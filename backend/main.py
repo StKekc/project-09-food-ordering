@@ -129,40 +129,67 @@ class UserResponse(BaseModel):
 
 @app.post("/auth/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register(req: RegisterRequest, conn: DbConn) -> UserResponse:
-    # Запись в БД выполняем только при полноценной регистрации.
-    if not req.name or req.birth_date is None:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="name and birth_date are required for registration",
-        )
-
     password_hash = pwd_context.hash(req.password) if req.password else None
 
     try:
-        res = await conn.execute(
+        existing = await conn.execute(
             text(
                 """
-                INSERT INTO users (phone, email, name, birth_date, password_hash)
-                VALUES (:phone, :email, :name, :birth_date, :password_hash)
-                RETURNING id, phone, email, name, birth_date, role, is_phone_verified, created_at
+                SELECT id
+                FROM users
+                WHERE phone = :phone
                 """
             ),
-            {
-                "phone": req.phone,
-                "email": req.email,
-                "name": req.name,
-                "birth_date": req.birth_date,
-                "password_hash": password_hash,
-            },
+            {"phone": req.phone},
         )
+        existing_row = existing.mappings().first()
+
+        if existing_row:
+            res = await conn.execute(
+                text(
+                    """
+                    UPDATE users
+                    SET
+                        email = COALESCE(:email, email),
+                        name = COALESCE(:name, name),
+                        birth_date = COALESCE(:birth_date, birth_date),
+                        password_hash = COALESCE(:password_hash, password_hash)
+                    WHERE phone = :phone
+                    RETURNING id, phone, email, name, birth_date, role, is_phone_verified, created_at
+                    """
+                ),
+                {
+                    "phone": req.phone,
+                    "email": req.email,
+                    "name": req.name,
+                    "birth_date": req.birth_date,
+                    "password_hash": password_hash,
+                },
+            )
+        else:
+            res = await conn.execute(
+                text(
+                    """
+                    INSERT INTO users (phone, email, name, birth_date, password_hash)
+                    VALUES (:phone, :email, :name, :birth_date, :password_hash)
+                    RETURNING id, phone, email, name, birth_date, role, is_phone_verified, created_at
+                    """
+                ),
+                {
+                    "phone": req.phone,
+                    "email": req.email,
+                    "name": req.name,
+                    "birth_date": req.birth_date,
+                    "password_hash": password_hash,
+                },
+            )
+
         await conn.commit()
         row = res.mappings().one()
         return UserResponse(**row)
     except Exception as e:  # unique violation etc.
         await conn.rollback()
         msg = str(e).lower()
-        if "unique" in msg and "phone" in msg:
-            raise HTTPException(status_code=409, detail="Phone already registered") from e
         raise
 
 

@@ -60,10 +60,49 @@ export function AuthCodeScreen() {
         return
       }
 
-      // Для демо/первичного входа принимаем любой 4-значный код без записи в БД.
-      setIsAuthenticated(true)
-      toast({ title: 'Успешно', description: 'Вы вошли. Заполните профиль для регистрации.' })
-      setCurrentScreen('profile')
+      // Для демо/первичного входа принимаем любой 4-значный код,
+      // но момент "входа/регистрации" фиксируем на бэкенде по номеру телефона.
+      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL
+      if (!apiBaseUrl) {
+        const msg = 'Не задан NEXT_PUBLIC_API_URL'
+        setError(msg)
+        toast({ title: 'Ошибка', description: msg, variant: 'destructive' })
+        return
+      }
+
+      const res = await fetch(`${apiBaseUrl}/auth/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ phone }),
+      })
+
+      if (res.status === 201) {
+        setIsAuthenticated(true)
+        toast({ title: 'Успешно', description: 'Вы вошли. Заполните профиль.' })
+        setCurrentScreen('profile')
+        return
+      }
+
+      let backendMessage = `Ошибка (HTTP ${res.status})`
+      try {
+        const data = await res.json()
+        const extracted =
+          (typeof data?.detail === 'string' && data.detail) ||
+          (typeof data?.message === 'string' && data.message) ||
+          (typeof data?.error === 'string' && data.error)
+        if (extracted) backendMessage = extracted
+      } catch {
+        // ignore non-JSON
+      }
+
+      setError(backendMessage)
+      toast({
+        title: 'Ошибка',
+        description: backendMessage,
+        variant: 'destructive',
+      })
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Ошибка сети'
       setError(msg)
