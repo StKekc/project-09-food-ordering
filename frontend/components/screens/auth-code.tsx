@@ -76,7 +76,6 @@ export function AuthCodeScreen() {
         body: JSON.stringify({
           phone,
           password: fullCode,
-          email: '',
           name: userProfile?.name ?? '',
         }),
       })
