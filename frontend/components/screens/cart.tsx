@@ -1,34 +1,99 @@
 'use client'
 
+import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ArrowLeft, Plus, Minus, Trash2, UtensilsCrossed, ShoppingBag, CreditCard } from 'lucide-react'
 import { useApp, type OrderType } from '@/lib/app-context'
 import { useCart } from '@/lib/cart-context'
+import { toast } from '@/hooks/use-toast'
 
 export function CartScreen() {
-  const { setCurrentScreen, orderType, setOrderType, setCurrentOrder } = useApp()
+  const { setCurrentScreen, orderType, setOrderType, setCurrentOrder, phone } = useApp()
   const { items, updateQuantity, removeItem, clearCart, totalPrice } = useCart()
+  const [isSubmitting, setIsSubmitting] = useState(false)
 
-  const handleCheckout = () => {
-    if (items.length === 0) return
+  const handleCheckout = async () => {
+    if (items.length === 0 || isSubmitting) return
 
-    // Create order
-    const order = {
-      id: crypto.randomUUID(),
-      items: items.map(item => ({
-        name: item.name,
-        quantity: item.quantity,
-        price: item.price,
-      })),
-      total: totalPrice,
-      type: orderType,
-      status: 'accepted' as const,
-      orderNumber: Math.floor(Math.random() * 900) + 100,
+    const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL
+    if (!apiBaseUrl) {
+      toast({
+        title: 'Ошибка',
+        description: 'Не задан NEXT_PUBLIC_API_URL',
+        variant: 'destructive',
+      })
+      return
     }
 
-    setCurrentOrder(order)
-    clearCart()
-    setCurrentScreen('order-status')
+    setIsSubmitting(true)
+    try {
+      const payload = {
+        user_id: phone || 'anonymous',
+        restaurant_id: 'muchacho',
+        items: items.map((item) => ({
+          dish_id: item.id,
+          quantity: item.quantity,
+        })),
+        customer_phone: phone,
+        delivery_type: orderType,
+      }
+
+      const res = await fetch(`${apiBaseUrl}/orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+
+      if (!res.ok) {
+        let backendMessage = `Ошибка оформления заказа (HTTP ${res.status})`
+        try {
+          const data = await res.json()
+          const extracted =
+            (typeof data?.detail === 'string' && data.detail) ||
+            (typeof data?.message === 'string' && data.message) ||
+            (typeof data?.error === 'string' && data.error)
+          if (extracted) backendMessage = extracted
+        } catch {
+          // ignore non-JSON
+        }
+        toast({ title: 'Ошибка', description: backendMessage, variant: 'destructive' })
+        return
+      }
+
+      const data = await res.json().catch(() => ({} as any))
+      const orderNumber =
+        (typeof data?.order_number === 'number' && data.order_number) ||
+        (typeof data?.orderNumber === 'number' && data.orderNumber) ||
+        (typeof data?.number === 'number' && data.number) ||
+        (typeof data?.id === 'number' && data.id) ||
+        (typeof data?.id === 'string' ? Number.parseInt(data.id, 10) : undefined) ||
+        Math.floor(Math.random() * 900) + 100
+
+      toast({
+        title: 'Заказ отправлен',
+        description: `Номер заказа: #${orderNumber}`,
+      })
+
+      setCurrentOrder({
+        id: typeof data?.id === 'string' ? data.id : crypto.randomUUID(),
+        items: items.map((item) => ({
+          name: item.name,
+          quantity: item.quantity,
+          price: item.price,
+        })),
+        total: totalPrice,
+        type: orderType,
+        status: 'accepted' as const,
+        orderNumber,
+      })
+      clearCart()
+      setCurrentScreen('order-status')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Ошибка сети'
+      toast({ title: 'Ошибка', description: msg, variant: 'destructive' })
+    } finally {
+      setIsSubmitting(false)
+    }
   }
 
   return (
@@ -206,10 +271,11 @@ export function CartScreen() {
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
             onClick={handleCheckout}
-            className="w-full bg-[#D4AF37] text-black py-3 sm:py-4 rounded-xl font-semibold text-base sm:text-lg flex items-center justify-center gap-2 shadow-lg shadow-[#D4AF37]/20"
+            disabled={isSubmitting}
+            className="w-full bg-[#D4AF37] text-black py-3 sm:py-4 rounded-xl font-semibold text-base sm:text-lg flex items-center justify-center gap-2 shadow-lg shadow-[#D4AF37]/20 disabled:opacity-60 disabled:cursor-not-allowed"
           >
             <CreditCard className="w-4 h-4 sm:w-5 sm:h-5" />
-            Оплатить {totalPrice} ₽
+            {isSubmitting ? 'Отправляем заказ…' : `Оплатить ${totalPrice} ₽`}
           </motion.button>
         </motion.div>
       )}
