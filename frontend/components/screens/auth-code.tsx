@@ -7,7 +7,7 @@ import { useApp } from '@/lib/app-context'
 import { toast } from '@/hooks/use-toast'
 
 export function AuthCodeScreen() {
-  const { phone, setCurrentScreen, setIsAuthenticated, userProfile } = useApp()
+  const { phone, setCurrentScreen, setIsAuthenticated } = useApp()
   const [code, setCode] = useState(['', '', '', ''])
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -60,56 +60,10 @@ export function AuthCodeScreen() {
         return
       }
 
-      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL
-      if (!apiBaseUrl) {
-        const msg = 'Не задан NEXT_PUBLIC_API_URL'
-        setError(msg)
-        toast({ title: 'Ошибка', description: msg, variant: 'destructive' })
-        return
-      }
-
-      const res = await fetch(`${apiBaseUrl}/auth/register`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          phone,
-          password: fullCode,
-          name: userProfile?.name ?? '',
-        }),
-      })
-
-      if (res.status === 201) {
-        toast({
-          title: 'Успешно',
-          description: 'Пользователь зарегистрирован',
-        })
-        setIsAuthenticated(true)
-        setCurrentScreen('menu')
-        return
-      }
-
-      let backendMessage = `Ошибка регистрации (HTTP ${res.status})`
-      try {
-        const data = await res.json()
-        const extracted =
-          (typeof data?.detail === 'string' && data.detail) ||
-          (typeof data?.message === 'string' && data.message) ||
-          (typeof data?.error === 'string' && data.error)
-        if (extracted) backendMessage = extracted
-      } catch {
-        // ignore non-JSON
-      }
-
-      setError(backendMessage)
-      toast({
-        title: 'Ошибка',
-        description: backendMessage,
-        variant: 'destructive',
-      })
-      setCode(['', '', '', ''])
-      inputRefs.current[0]?.focus()
+      // Для демо/первичного входа принимаем любой 4-значный код без записи в БД.
+      setIsAuthenticated(true)
+      toast({ title: 'Успешно', description: 'Вы вошли. Заполните профиль для регистрации.' })
+      setCurrentScreen('profile')
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Ошибка сети'
       setError(msg)

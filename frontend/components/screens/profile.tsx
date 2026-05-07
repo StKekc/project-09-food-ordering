@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { ArrowLeft, User, Calendar, Save } from 'lucide-react'
 import { useApp } from '@/lib/app-context'
+import { toast } from '@/hooks/use-toast'
 
 const normalizeBirthdayForDisplay = (value: string) => {
   if (!value) return ''
@@ -35,10 +36,102 @@ export function ProfileScreen() {
   const [birthday, setBirthday] = useState(normalizeBirthdayForDisplay(userProfile.birthday))
   const [saved, setSaved] = useState(false)
 
-  const handleSave = () => {
-    setUserProfile({ name, birthday })
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2000)
+  const parseBirthdayToIso = (value: string): string | null => {
+    const m = value.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+    if (!m) return null
+    const [, dd, mm, yyyy] = m
+    const day = Number(dd)
+    const month = Number(mm)
+    const year = Number(yyyy)
+    if (!Number.isFinite(day) || !Number.isFinite(month) || !Number.isFinite(year)) return null
+    if (year < 1900 || year > 2100) return null
+    if (month < 1 || month > 12) return null
+
+    const date = new Date(Date.UTC(year, month - 1, day))
+    // Validate overflow (e.g. 31/02/2000)
+    if (
+      date.getUTCFullYear() !== year ||
+      date.getUTCMonth() !== month - 1 ||
+      date.getUTCDate() !== day
+    ) {
+      return null
+    }
+
+    return `${yyyy}-${mm}-${dd}`
+  }
+
+  const handleSave = async () => {
+    const normalizedName = name.trim()
+    const normalizedBirthday = birthday.trim()
+
+    setUserProfile({ name: normalizedName, birthday: normalizedBirthday })
+
+    // В БД отправляем только полноценную регистрацию: phone + name + birth_date.
+    if (!normalizedName || !normalizedBirthday) {
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+      toast({
+        title: 'Профиль сохранён',
+        description: 'Чтобы завершить регистрацию, заполните имя и дату рождения.',
+      })
+      return
+    }
+
+    const birthDateIso = parseBirthdayToIso(normalizedBirthday)
+    if (!birthDateIso) {
+      toast({
+        title: 'Ошибка',
+        description: 'Введите дату рождения в формате дд/мм/гггг',
+        variant: 'destructive',
+      })
+      return
+    }
+
+    const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL
+    if (!apiBaseUrl) {
+      toast({
+        title: 'Ошибка',
+        description: 'Не задан NEXT_PUBLIC_API_URL',
+        variant: 'destructive',
+      })
+      return
+    }
+
+    try {
+      const res = await fetch(`${apiBaseUrl}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone,
+          name: normalizedName,
+          birth_date: birthDateIso,
+        }),
+      })
+
+      if (res.status === 201) {
+        setSaved(true)
+        setTimeout(() => setSaved(false), 2000)
+        toast({ title: 'Успешно', description: 'Регистрация завершена' })
+        return
+      }
+
+      let backendMessage = `Ошибка регистрации (HTTP ${res.status})`
+      try {
+        const data = await res.json()
+        const extracted =
+          (typeof data?.detail === 'string' && data.detail) ||
+          (typeof data?.message === 'string' && data.message) ||
+          (typeof data?.error === 'string' && data.error)
+        if (extracted) backendMessage = extracted
+      } catch {
+        // ignore non-JSON
+      }
+
+      toast({ title: 'Ошибка', description: backendMessage, variant: 'destructive' })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Ошибка сети'
+      toast({ title: 'Ошибка', description: msg, variant: 'destructive' })
+    }
   }
 
   const formatPhoneDisplay = (phoneNumber: string) => {

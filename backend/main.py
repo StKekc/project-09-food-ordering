@@ -129,6 +129,13 @@ class UserResponse(BaseModel):
 
 @app.post("/auth/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register(req: RegisterRequest, conn: DbConn) -> UserResponse:
+    # Запись в БД выполняем только при полноценной регистрации.
+    if not req.name or req.birth_date is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="name and birth_date are required for registration",
+        )
+
     password_hash = pwd_context.hash(req.password) if req.password else None
 
     try:
