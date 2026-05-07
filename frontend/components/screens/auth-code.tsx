@@ -4,9 +4,10 @@ import { useState, useRef, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { ArrowLeft, RefreshCw } from 'lucide-react'
 import { useApp } from '@/lib/app-context'
+import { toast } from '@/hooks/use-toast'
 
 export function AuthCodeScreen() {
-  const { phone, setCurrentScreen, setIsAuthenticated } = useApp()
+  const { phone, setCurrentScreen, setIsAuthenticated, userProfile } = useApp()
   const [code, setCode] = useState(['', '', '', ''])
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -50,21 +51,73 @@ export function AuthCodeScreen() {
 
   const handleSubmit = async (fullCode: string) => {
     setIsLoading(true)
-    
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 1000))
-    
-    // Accept any 4-digit code for demo
-    if (fullCode.length === 4) {
-      setIsAuthenticated(true)
-      setCurrentScreen('menu')
-    } else {
-      setError('Неверный код')
+
+    try {
+      if (fullCode.length !== 4) {
+        setError('Неверный код')
+        setCode(['', '', '', ''])
+        inputRefs.current[0]?.focus()
+        return
+      }
+
+      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL
+      if (!apiBaseUrl) {
+        const msg = 'Не задан NEXT_PUBLIC_API_URL'
+        setError(msg)
+        toast({ title: 'Ошибка', description: msg, variant: 'destructive' })
+        return
+      }
+
+      const res = await fetch(`${apiBaseUrl}/auth/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          phone,
+          password: fullCode,
+          email: '',
+          name: userProfile?.name ?? '',
+        }),
+      })
+
+      if (res.status === 201) {
+        toast({
+          title: 'Успешно',
+          description: 'Пользователь зарегистрирован',
+        })
+        setIsAuthenticated(true)
+        setCurrentScreen('menu')
+        return
+      }
+
+      let backendMessage = `Ошибка регистрации (HTTP ${res.status})`
+      try {
+        const data = await res.json()
+        const extracted =
+          (typeof data?.detail === 'string' && data.detail) ||
+          (typeof data?.message === 'string' && data.message) ||
+          (typeof data?.error === 'string' && data.error)
+        if (extracted) backendMessage = extracted
+      } catch {
+        // ignore non-JSON
+      }
+
+      setError(backendMessage)
+      toast({
+        title: 'Ошибка',
+        description: backendMessage,
+        variant: 'destructive',
+      })
       setCode(['', '', '', ''])
       inputRefs.current[0]?.focus()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Ошибка сети'
+      setError(msg)
+      toast({ title: 'Ошибка', description: msg, variant: 'destructive' })
+    } finally {
+      setIsLoading(false)
     }
-    
-    setIsLoading(false)
   }
 
   const handleResend = () => {

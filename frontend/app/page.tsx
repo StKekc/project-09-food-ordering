@@ -3,6 +3,7 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { CartProvider } from '@/lib/cart-context'
 import { AppProvider, useApp } from '@/lib/app-context'
+import { Toaster } from '@/components/ui/toaster'
 import { AuthPhoneScreen } from '@/components/screens/auth-phone'
 import { AuthCodeScreen } from '@/components/screens/auth-code'
 import { MenuScreen } from '@/components/screens/menu'
@@ -44,6 +45,7 @@ export default function MuchachoApp() {
     <AppProvider>
       <CartProvider>
         <AppContent />
+        <Toaster />
       </CartProvider>
     </AppProvider>
   )
