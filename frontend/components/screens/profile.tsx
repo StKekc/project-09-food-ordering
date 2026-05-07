@@ -66,25 +66,31 @@ export function ProfileScreen() {
 
     setUserProfile({ name: normalizedName, birthday: normalizedBirthday })
 
-    // В БД отправляем только полноценную регистрацию: phone + name + birth_date.
-    if (!normalizedName || !normalizedBirthday) {
+    // В БД отправляем дополнение профиля, если заполнено хотя бы одно поле.
+    if (!normalizedName && !normalizedBirthday) {
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
       toast({
         title: 'Профиль сохранён',
-        description: 'Чтобы завершить регистрацию, заполните имя и дату рождения.',
+        description: 'Заполните имя и/или дату рождения, чтобы дополнить профиль.',
       })
       return
     }
 
-    const birthDateIso = parseBirthdayToIso(normalizedBirthday)
-    if (!birthDateIso) {
-      toast({
-        title: 'Ошибка',
-        description: 'Введите дату рождения в формате дд/мм/гггг',
-        variant: 'destructive',
-      })
-      return
+    const payload: { phone: string; name?: string; birth_date?: string } = { phone }
+    if (normalizedName) payload.name = normalizedName
+
+    if (normalizedBirthday) {
+      const birthDateIso = parseBirthdayToIso(normalizedBirthday)
+      if (!birthDateIso) {
+        toast({
+          title: 'Ошибка',
+          description: 'Введите дату рождения в формате дд/мм/гггг',
+          variant: 'destructive',
+        })
+        return
+      }
+      payload.birth_date = birthDateIso
     }
 
     const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL
@@ -101,17 +107,13 @@ export function ProfileScreen() {
       const res = await fetch(`${apiBaseUrl}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          phone,
-          name: normalizedName,
-          birth_date: birthDateIso,
-        }),
+        body: JSON.stringify(payload),
       })
 
       if (res.status === 201) {
         setSaved(true)
         setTimeout(() => setSaved(false), 2000)
-        toast({ title: 'Успешно', description: 'Регистрация завершена' })
+        toast({ title: 'Успешно', description: 'Профиль обновлён' })
         return
       }
 
