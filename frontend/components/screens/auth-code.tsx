@@ -4,10 +4,21 @@ import { useState, useRef, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { ArrowLeft, RefreshCw } from 'lucide-react'
 import { useApp } from '@/lib/app-context'
-import { toast } from '@/hooks/use-toast'
+import {
+  updateUserProfile,
+  normalizePhoneForApi,
+  mapUserResponseToSession,
+} from '@/lib/users-api'
 
 export function AuthCodeScreen() {
-  const { phone, setCurrentScreen, setIsAuthenticated } = useApp()
+  const {
+    phone,
+    setCurrentScreen,
+    setIsAuthenticated,
+    setUserProfile,
+    setUserId,
+    setIsAdmin,
+  } = useApp()
   const [code, setCode] = useState(['', '', '', ''])
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -37,7 +48,6 @@ export function AuthCodeScreen() {
       inputRefs.current[index + 1]?.focus()
     }
 
-    // Auto-submit when all digits are entered
     if (newCode.every(digit => digit !== '') && value) {
       handleSubmit(newCode.join(''))
     }
@@ -50,63 +60,41 @@ export function AuthCodeScreen() {
   }
 
   const handleSubmit = async (fullCode: string) => {
+    if (fullCode.length !== 4) {
+      setError('Введите 4-значный код')
+      setCode(['', '', '', ''])
+      inputRefs.current[0]?.focus()
+      return
+    }
+
+    if (!phone?.trim()) {
+      setError('Номер телефона не указан')
+      return
+    }
+
     setIsLoading(true)
+    setError('')
 
     try {
-      if (fullCode.length !== 4) {
-        setError('Неверный код')
-        setCode(['', '', '', ''])
-        inputRefs.current[0]?.focus()
-        return
-      }
-
-      // Для демо/первичного входа принимаем любой 4-значный код,
-      // но момент "входа/регистрации" фиксируем на бэкенде по номеру телефона.
-      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL
-      if (!apiBaseUrl) {
-        const msg = 'Не задан NEXT_PUBLIC_API_URL'
-        setError(msg)
-        toast({ title: 'Ошибка', description: msg, variant: 'destructive' })
-        return
-      }
-
-      const res = await fetch(`${apiBaseUrl}/auth/register`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ phone }),
+      const user = await updateUserProfile({
+        phone: normalizePhoneForApi(phone),
       })
+      const session = mapUserResponseToSession(user)
 
-      if (res.status === 201) {
-        setIsAuthenticated(true)
-        toast({ title: 'Успешно', description: 'Вы вошли. Заполните профиль.' })
-        setCurrentScreen('profile')
-        return
+      setUserId(session.userId)
+      setUserProfile(session.profile)
+      setIsAdmin(session.isAdmin)
+      setIsAuthenticated(true)
+
+      if (session.isAdmin) {
+        setCurrentScreen('admin')
+      } else {
+        setCurrentScreen('menu')
       }
-
-      let backendMessage = `Ошибка (HTTP ${res.status})`
-      try {
-        const data = await res.json()
-        const extracted =
-          (typeof data?.detail === 'string' && data.detail) ||
-          (typeof data?.message === 'string' && data.message) ||
-          (typeof data?.error === 'string' && data.error)
-        if (extracted) backendMessage = extracted
-      } catch {
-        // ignore non-JSON
-      }
-
-      setError(backendMessage)
-      toast({
-        title: 'Ошибка',
-        description: backendMessage,
-        variant: 'destructive',
-      })
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Ошибка сети'
-      setError(msg)
-      toast({ title: 'Ошибка', description: msg, variant: 'destructive' })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось войти. Проверьте подключение к серверу.')
+      setCode(['', '', '', ''])
+      inputRefs.current[0]?.focus()
     } finally {
       setIsLoading(false)
     }
@@ -115,7 +103,7 @@ export function AuthCodeScreen() {
   const handleResend = () => {
     if (countdown === 0) {
       setCountdown(60)
-      // Simulate resending code
+      // SMS не подключён: повторная отправка кода пока только сбрасывает таймер
     }
   }
 

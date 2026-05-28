@@ -2,138 +2,57 @@
 
 import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { ArrowLeft, User, Calendar, Save } from 'lucide-react'
+import { ArrowLeft, User, Calendar, Save, Mail, History, LogOut } from 'lucide-react'
 import { useApp } from '@/lib/app-context'
-import { toast } from '@/hooks/use-toast'
-
-const normalizeBirthdayForDisplay = (value: string) => {
-  if (!value) return ''
-
-  // Convert old ISO value from date input to dd/mm/yyyy.
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    const [year, month, day] = value.split('-')
-    return `${day}/${month}/${year}`
-  }
-
-  return value
-}
-
-const formatBirthdayInput = (value: string) => {
-  const digitsOnly = value.replace(/\D/g, '').slice(0, 8)
-  const day = digitsOnly.slice(0, 2)
-  const month = digitsOnly.slice(2, 4)
-  const year = digitsOnly.slice(4, 8)
-
-  if (digitsOnly.length <= 2) return day
-  if (digitsOnly.length <= 4) return `${day}/${month}`
-
-  return `${day}/${month}/${year}`
-}
+import { useCart } from '@/lib/cart-context'
+import {
+  updateUserProfile,
+  normalizePhoneForApi,
+  birthdayToIso,
+  mapUserResponseToSession,
+} from '@/lib/users-api'
 
 export function ProfileScreen() {
-  const { setCurrentScreen, userProfile, setUserProfile, phone } = useApp()
+  const { setCurrentScreen, userProfile, setUserProfile, setUserId, setIsAdmin, phone, logout } = useApp()
+  const { clearCart } = useCart()
   const [name, setName] = useState(userProfile.name)
-  const [birthday, setBirthday] = useState(normalizeBirthdayForDisplay(userProfile.birthday))
+  const [birthday, setBirthday] = useState(userProfile.birthday)
+  const [email, setEmail] = useState(userProfile.email || '')
   const [saved, setSaved] = useState(false)
-
-  const parseBirthdayToIso = (value: string): string | null => {
-    const m = value.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
-    if (!m) return null
-    const [, dd, mm, yyyy] = m
-    const day = Number(dd)
-    const month = Number(mm)
-    const year = Number(yyyy)
-    if (!Number.isFinite(day) || !Number.isFinite(month) || !Number.isFinite(year)) return null
-    if (year < 1900 || year > 2100) return null
-    if (month < 1 || month > 12) return null
-
-    const date = new Date(Date.UTC(year, month - 1, day))
-    // Validate overflow (e.g. 31/02/2000)
-    if (
-      date.getUTCFullYear() !== year ||
-      date.getUTCMonth() !== month - 1 ||
-      date.getUTCDate() !== day
-    ) {
-      return null
-    }
-
-    return `${yyyy}-${mm}-${dd}`
-  }
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   const handleSave = async () => {
-    const normalizedName = name.trim()
-    const normalizedBirthday = birthday.trim()
+    if (!phone) {
+      setSaveError('Номер телефона не указан')
+      return
+    }
 
-    setUserProfile({ name: normalizedName, birthday: normalizedBirthday })
-
-    // В БД отправляем дополнение профиля, если заполнено хотя бы одно поле.
-    if (!normalizedName && !normalizedBirthday) {
+    setSaving(true)
+    setSaveError(null)
+    try {
+      const user = await updateUserProfile({
+        phone: normalizePhoneForApi(phone),
+        name: name.trim() || null,
+        email: email.trim() || null,
+        birth_date: birthdayToIso(birthday),
+      })
+      const session = mapUserResponseToSession(user)
+      setUserProfile(session.profile)
+      setUserId(session.userId)
+      setIsAdmin(session.isAdmin)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
-      toast({
-        title: 'Профиль сохранён',
-        description: 'Заполните имя и/или дату рождения, чтобы дополнить профиль.',
-      })
-      return
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Не удалось сохранить профиль')
+    } finally {
+      setSaving(false)
     }
+  }
 
-    const payload: { phone: string; name?: string; birth_date?: string } = { phone }
-    if (normalizedName) payload.name = normalizedName
-
-    if (normalizedBirthday) {
-      const birthDateIso = parseBirthdayToIso(normalizedBirthday)
-      if (!birthDateIso) {
-        toast({
-          title: 'Ошибка',
-          description: 'Введите дату рождения в формате дд/мм/гггг',
-          variant: 'destructive',
-        })
-        return
-      }
-      payload.birth_date = birthDateIso
-    }
-
-    const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL
-    if (!apiBaseUrl) {
-      toast({
-        title: 'Ошибка',
-        description: 'Не задан NEXT_PUBLIC_API_URL',
-        variant: 'destructive',
-      })
-      return
-    }
-
-    try {
-      const res = await fetch(`${apiBaseUrl}/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-
-      if (res.status === 201) {
-        setSaved(true)
-        setTimeout(() => setSaved(false), 2000)
-        toast({ title: 'Успешно', description: 'Профиль обновлён' })
-        return
-      }
-
-      let backendMessage = `Ошибка регистрации (HTTP ${res.status})`
-      try {
-        const data = await res.json()
-        const extracted =
-          (typeof data?.detail === 'string' && data.detail) ||
-          (typeof data?.message === 'string' && data.message) ||
-          (typeof data?.error === 'string' && data.error)
-        if (extracted) backendMessage = extracted
-      } catch {
-        // ignore non-JSON
-      }
-
-      toast({ title: 'Ошибка', description: backendMessage, variant: 'destructive' })
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Ошибка сети'
-      toast({ title: 'Ошибка', description: msg, variant: 'destructive' })
-    }
+  const handleLogout = () => {
+    clearCart()
+    logout()
   }
 
   const formatPhoneDisplay = (phoneNumber: string) => {
@@ -141,8 +60,24 @@ export function ProfileScreen() {
     return phoneNumber
   }
 
+  const formatBirthday = (value: string) => {
+    const digits = value.replace(/\D/g, '')
+    if (digits.length === 0) return ''
+    if (digits.length <= 2) return digits
+    if (digits.length <= 4) return `${digits.slice(0, 2)}.${digits.slice(2)}`
+    return `${digits.slice(0, 2)}.${digits.slice(2, 4)}.${digits.slice(4, 8)}`
+  }
+
+  const handleBirthdayChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value
+    const digits = value.replace(/\D/g, '')
+    if (digits.length <= 8) {
+      setBirthday(formatBirthday(digits))
+    }
+  }
+
   return (
-    <div className="min-h-screen flex flex-col px-4 sm:px-6 py-6 sm:py-8 max-w-md mx-auto">
+    <div className="min-h-screen flex flex-col px-4 sm:px-6 py-6 sm:py-8 pb-8 max-w-md mx-auto">
       {/* Header */}
       <motion.div
         initial={{ opacity: 0, y: -20 }}
@@ -209,7 +144,7 @@ export function ProfileScreen() {
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.4 }}
-        className="mb-6 sm:mb-8"
+        className="mb-4 sm:mb-6"
       >
         <label className="block text-xs sm:text-sm text-[#a1a1aa] mb-2">
           <Calendar className="w-3.5 h-3.5 sm:w-4 sm:h-4 inline mr-2" />
@@ -217,14 +152,37 @@ export function ProfileScreen() {
         </label>
         <input
           type="text"
-          value={birthday}
-          onChange={(e) => setBirthday(formatBirthdayInput(e.target.value))}
-          placeholder="дд/мм/гггг"
           inputMode="numeric"
-          maxLength={10}
+          value={birthday}
+          onChange={handleBirthdayChange}
+          placeholder="ДД.ММ.ГГГГ"
           className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg sm:rounded-xl px-3 sm:px-4 py-3 sm:py-4 text-sm sm:text-base text-white placeholder-[#666] focus:outline-none focus:border-[#D4AF37] transition-colors"
         />
       </motion.div>
+
+      {/* Email */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.45 }}
+        className="mb-6 sm:mb-8"
+      >
+        <label className="block text-xs sm:text-sm text-[#a1a1aa] mb-2">
+          <Mail className="w-3.5 h-3.5 sm:w-4 sm:h-4 inline mr-2" />
+          Email
+        </label>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="example@mail.com"
+          className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg sm:rounded-xl px-3 sm:px-4 py-3 sm:py-4 text-sm sm:text-base text-white placeholder-[#666] focus:outline-none focus:border-[#D4AF37] transition-colors"
+        />
+      </motion.div>
+
+      {saveError && (
+        <p className="text-sm text-red-400 mb-4">{saveError}</p>
+      )}
 
       {/* Save Button */}
       <motion.button
@@ -233,10 +191,24 @@ export function ProfileScreen() {
         transition={{ delay: 0.5 }}
         whileTap={{ scale: 0.98 }}
         onClick={handleSave}
-        className="w-full bg-[#D4AF37] text-black py-3 sm:py-4 rounded-lg sm:rounded-xl font-semibold text-sm sm:text-base flex items-center justify-center gap-2 mb-3 sm:mb-4"
+        disabled={saving}
+        className="w-full bg-[#D4AF37] text-black py-3 sm:py-4 rounded-lg sm:rounded-xl font-semibold text-sm sm:text-base flex items-center justify-center gap-2 mb-3 sm:mb-4 disabled:opacity-50"
       >
         <Save className="w-4 h-4 sm:w-5 sm:h-5" />
-        {saved ? 'Сохранено!' : 'Сохранить'}
+        {saving ? 'Сохранение…' : saved ? 'Сохранено!' : 'Сохранить'}
+      </motion.button>
+
+      {/* Order History Button */}
+      <motion.button
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.55 }}
+        whileTap={{ scale: 0.98 }}
+        onClick={() => setCurrentScreen('order-history')}
+        className="w-full bg-[#1a1a1a] text-white py-3 sm:py-4 rounded-lg sm:rounded-xl font-semibold text-sm sm:text-base border border-[#333] hover:border-[#D4AF37] transition-colors flex items-center justify-center gap-2 mb-3 sm:mb-4"
+      >
+        <History className="w-4 h-4 sm:w-5 sm:h-5" />
+        История заказов
       </motion.button>
 
       {/* Back to Menu Button */}
@@ -249,6 +221,21 @@ export function ProfileScreen() {
         className="w-full bg-[#1a1a1a] text-white py-3 sm:py-4 rounded-lg sm:rounded-xl font-semibold text-sm sm:text-base border border-[#333] hover:border-[#D4AF37] transition-colors"
       >
         Вернуться в меню
+      </motion.button>
+
+      <div className="flex-1 min-h-4" />
+
+      {/* Logout Button */}
+      <motion.button
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.65 }}
+        whileTap={{ scale: 0.98 }}
+        onClick={handleLogout}
+        className="w-full bg-transparent text-red-400 py-3 sm:py-4 rounded-lg sm:rounded-xl font-semibold text-sm sm:text-base border border-red-400/40 hover:border-red-400 hover:bg-red-400/10 transition-colors flex items-center justify-center gap-2 mt-auto"
+      >
+        <LogOut className="w-4 h-4 sm:w-5 sm:h-5" />
+        Выйти из аккаунта
       </motion.button>
     </div>
   )

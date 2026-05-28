@@ -1,8 +1,8 @@
 'use client'
 
-import { createContext, useContext, useState, type ReactNode } from 'react'
+import { createContext, useContext, useState, useCallback, type ReactNode } from 'react'
 
-export type Screen = 'auth-phone' | 'auth-code' | 'menu' | 'cart' | 'order-status' | 'profile'
+export type Screen = 'auth-phone' | 'auth-code' | 'menu' | 'cart' | 'order-status' | 'profile' | 'order-history' | 'terms' | 'admin'
 export type OrderType = 'dine-in' | 'takeaway'
 
 interface Order {
@@ -11,12 +11,19 @@ interface Order {
   total: number
   type: OrderType
   status: 'accepted' | 'preparing' | 'ready'
-  orderNumber: number
+  orderNumber: number | string
+  date?: string
 }
 
-interface UserProfile {
+export interface HistoryOrder extends Order {
+  date: string
+}
+
+export interface UserProfile {
   name: string
   birthday: string
+  email: string
+  role: string
 }
 
 interface AppContextType {
@@ -32,12 +39,23 @@ interface AppContextType {
   setCurrentOrder: (order: Order | null) => void
   userProfile: UserProfile
   setUserProfile: (profile: UserProfile) => void
+  userId: number | null
+  setUserId: (id: number | null) => void
+  orderHistory: HistoryOrder[]
+  addToOrderHistory: (order: HistoryOrder) => void
+  isAdmin: boolean
+  setIsAdmin: (value: boolean) => void
+  adminPhones: string[]
+  addAdminPhone: (phone: string) => void
+  removeAdminPhone: (phone: string) => void
+  isAdminUser: () => boolean
+  logout: () => void
 }
 
 // Restaurant constants
-export const RESTAURANT_PHONE = '+7(900)110-20-03'
-export const RESTAURANT_ADDRESS = 'Пр. Добролюбова 7/2'
-export const RESTAURANT_COORDS = '59.952012,30.308753' // St. Petersburg coordinates
+export const RESTAURANT_PHONE = '+7(900) 110-20-03'
+export const RESTAURANT_ADDRESS = 'Большой проспект П.С., 39'
+export const RESTAURANT_COORDS = '59.960275,30.303612' // St. Petersburg coordinates
 
 const AppContext = createContext<AppContextType | undefined>(undefined)
 
@@ -47,7 +65,46 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [orderType, setOrderType] = useState<OrderType>('dine-in')
   const [currentOrder, setCurrentOrder] = useState<Order | null>(null)
-  const [userProfile, setUserProfile] = useState<UserProfile>({ name: '', birthday: '' })
+  const [userProfile, setUserProfile] = useState<UserProfile>({
+    name: '',
+    birthday: '',
+    email: '',
+    role: 'user',
+  })
+  const [userId, setUserId] = useState<number | null>(null)
+  const [orderHistory, setOrderHistory] = useState<HistoryOrder[]>([])
+  const [isAdmin, setIsAdmin] = useState(false)
+  // Default admin phone - can be extended via admin panel
+  const [adminPhones, setAdminPhones] = useState<string[]>(['+7 (999) 999-99-99'])
+
+  const addToOrderHistory = useCallback((order: HistoryOrder) => {
+    setOrderHistory(prev => [order, ...prev])
+  }, [])
+
+  const addAdminPhone = useCallback((newPhone: string) => {
+    setAdminPhones(prev => prev.includes(newPhone) ? prev : [...prev, newPhone])
+  }, [])
+
+  const removeAdminPhone = useCallback((phoneToRemove: string) => {
+    // Don't allow removing the default admin phone
+    if (phoneToRemove === '+7 (999) 999-99-99') return
+    setAdminPhones(prev => prev.filter(p => p !== phoneToRemove))
+  }, [])
+
+  const isAdminUser = useCallback(() => {
+    return userProfile.role === 'admin' || adminPhones.includes(phone)
+  }, [adminPhones, phone, userProfile.role])
+
+  const logout = useCallback(() => {
+    setIsAuthenticated(false)
+    setPhone('')
+    setUserProfile({ name: '', birthday: '', email: '', role: 'user' })
+    setUserId(null)
+    setCurrentOrder(null)
+    setOrderHistory([])
+    setIsAdmin(false)
+    setCurrentScreen('auth-phone')
+  }, [])
 
   return (
     <AppContext.Provider
@@ -64,6 +121,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setCurrentOrder,
         userProfile,
         setUserProfile,
+        userId,
+        setUserId,
+        orderHistory,
+        addToOrderHistory,
+        isAdmin,
+        setIsAdmin,
+        adminPhones,
+        addAdminPhone,
+        removeAdminPhone,
+        isAdminUser,
+        logout,
       }}
     >
       {children}
