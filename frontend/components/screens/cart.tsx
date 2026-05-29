@@ -5,94 +5,123 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { ArrowLeft, Plus, Minus, Trash2, UtensilsCrossed, ShoppingBag, CreditCard } from 'lucide-react'
 import { useApp, type OrderType } from '@/lib/app-context'
 import { useCart } from '@/lib/cart-context'
-import { toast } from '@/hooks/use-toast'
+import { createOrder } from '@/lib/orders-api'
+import {
+  updateUserProfile,
+  normalizePhoneForApi,
+  birthdayToIso,
+} from '@/lib/users-api'
+
+const DISH_PLACEHOLDER_IMAGE =
+  'https://habrastorage.org/r/w1560/getpro/habr/upload_files/cb0/f0b/c6f/cb0f0bc6f20ed4cb8b2d04e62efb4799.jpeg'
+
+const DEFAULT_RESTAURANT_ID = 1
 
 export function CartScreen() {
-  const { setCurrentScreen, orderType, setOrderType, setCurrentOrder, phone } = useApp()
+  const {
+    setCurrentScreen,
+    orderType,
+    setOrderType,
+    setCurrentOrder,
+    phone,
+    userProfile,
+    userId,
+    setUserId,
+  } = useApp()
   const { items, updateQuantity, removeItem, clearCart, totalPrice } = useCart()
-  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [checkoutError, setCheckoutError] = useState<string | null>(null)
+  const [isCheckingOut, setIsCheckingOut] = useState(false)
 
   const handleCheckout = async () => {
-    if (items.length === 0 || isSubmitting) return
+    const deliveryType = (orderType === 'dine-in' ? 'at_table' : 'pickup') as 'at_table' | 'pickup'
+    const orderData = {
+      restaurant_id: DEFAULT_RESTAURANT_ID,
+      delivery_type: deliveryType,
+      table_number: deliveryType === 'at_table' ? '1' : null,
+      customer_phone: phone ? normalizePhoneForApi(phone) : '',
+      customer_name: userProfile.name.trim() || null,
+      items: items.map(item => ({
+        dish_id: parseInt(item.id, 10),
+        quantity: item.quantity,
+      })),
+    }
 
-    const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL
-    if (!apiBaseUrl) {
-      toast({
-        title: 'Ошибка',
-        description: 'Не задан NEXT_PUBLIC_API_URL',
-        variant: 'destructive',
-      })
+    console.log('Клик сработал, отправляем заказ:', orderData)
+
+    if (items.length === 0) {
+      console.warn('Оформление прервано: корзина пуста')
       return
     }
 
-    setIsSubmitting(true)
+    if (!phone?.trim()) {
+      console.warn('Оформление прервано: не указан телефон пользователя')
+      setCheckoutError('Укажите телефон в профиле')
+      return
+    }
+
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL
+    if (!apiUrl?.trim()) {
+      console.error('Оформление прервано: NEXT_PUBLIC_API_URL не задан')
+      setCheckoutError('Не настроен адрес API (NEXT_PUBLIC_API_URL)')
+      return
+    }
+
+    const invalidDish = orderData.items.find(
+      it => !Number.isFinite(it.dish_id) || it.dish_id <= 0
+    )
+    if (invalidDish) {
+      console.warn('Оформление прервано: некорректный dish_id в корзине', invalidDish)
+      setCheckoutError('Не удалось определить блюда в корзине. Обновите меню.')
+      return
+    }
+
+    setIsCheckingOut(true)
+    setCheckoutError(null)
+
     try {
+      let resolvedUserId = userId
+      if (!resolvedUserId) {
+        console.log('user_id отсутствует, создаём/обновляем профиль перед заказом')
+        const user = await updateUserProfile({
+          phone: orderData.customer_phone,
+          name: userProfile.name.trim() || null,
+          email: userProfile.email.trim() || null,
+          birth_date: birthdayToIso(userProfile.birthday),
+        })
+        resolvedUserId = user.id
+        setUserId(user.id)
+      }
+
       const payload = {
-        user_id: phone || 'anonymous',
-        restaurant_id: 'muchacho',
-        items: items.map((item) => ({
-          dish_id: item.id,
-          quantity: item.quantity,
-        })),
-        customer_phone: phone,
-        delivery_type: orderType,
+        user_id: resolvedUserId,
+        ...orderData,
       }
 
-      const res = await fetch(`${apiBaseUrl}/orders`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
+      console.log('POST', `${apiUrl.replace(/\/$/, '')}/orders`, payload)
 
-      if (!res.ok) {
-        let backendMessage = `Ошибка оформления заказа (HTTP ${res.status})`
-        try {
-          const data = await res.json()
-          const extracted =
-            (typeof data?.detail === 'string' && data.detail) ||
-            (typeof data?.message === 'string' && data.message) ||
-            (typeof data?.error === 'string' && data.error)
-          if (extracted) backendMessage = extracted
-        } catch {
-          // ignore non-JSON
-        }
-        toast({ title: 'Ошибка', description: backendMessage, variant: 'destructive' })
-        return
-      }
+      const created = await createOrder(payload)
 
-      const data = await res.json().catch(() => ({} as any))
-      const orderNumber =
-        (typeof data?.order_number === 'number' && data.order_number) ||
-        (typeof data?.orderNumber === 'number' && data.orderNumber) ||
-        (typeof data?.number === 'number' && data.number) ||
-        (typeof data?.id === 'number' && data.id) ||
-        (typeof data?.id === 'string' ? Number.parseInt(data.id, 10) : undefined) ||
-        Math.floor(Math.random() * 900) + 100
-
-      toast({
-        title: 'Заказ отправлен',
-        description: `Номер заказа: #${orderNumber}`,
-      })
-
-      setCurrentOrder({
-        id: typeof data?.id === 'string' ? data.id : crypto.randomUUID(),
-        items: items.map((item) => ({
+      const order = {
+        id: String(created.id),
+        items: items.map(item => ({
           name: item.name,
           quantity: item.quantity,
           price: item.price,
         })),
-        total: totalPrice,
+        total: Number(created.total_amount),
         type: orderType,
         status: 'accepted' as const,
-        orderNumber,
-      })
+        orderNumber: created.order_number,
+      }
+
+      setCurrentOrder(order)
       clearCart()
       setCurrentScreen('order-status')
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Ошибка сети'
-      toast({ title: 'Ошибка', description: msg, variant: 'destructive' })
+    } catch (err) {
+      console.error('Ошибка при отправке заказа:', err)
+      setCheckoutError(err instanceof Error ? err.message : 'Не удалось оформить заказ')
     } finally {
-      setIsSubmitting(false)
+      setIsCheckingOut(false)
     }
   }
 
@@ -160,7 +189,7 @@ export function CartScreen() {
                     {/* Item Image */}
                     <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-lg overflow-hidden bg-[#252525] flex-shrink-0">
                       <img
-                        src={item.image_url}
+                        src={item.image_url?.trim() || DISH_PLACEHOLDER_IMAGE}
                         alt={item.name}
                         className="w-full h-full object-cover"
                       />
@@ -266,16 +295,20 @@ export function CartScreen() {
             </div>
           </div>
 
+          {checkoutError && (
+            <p className="text-sm text-red-400 mb-2">{checkoutError}</p>
+          )}
+
           {/* Checkout Button */}
           <motion.button
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
             onClick={handleCheckout}
-            disabled={isSubmitting}
-            className="w-full bg-[#D4AF37] text-black py-3 sm:py-4 rounded-xl font-semibold text-base sm:text-lg flex items-center justify-center gap-2 shadow-lg shadow-[#D4AF37]/20 disabled:opacity-60 disabled:cursor-not-allowed"
+            disabled={isCheckingOut}
+            className="w-full bg-[#D4AF37] text-black py-3 sm:py-4 rounded-xl font-semibold text-base sm:text-lg flex items-center justify-center gap-2 shadow-lg shadow-[#D4AF37]/20 disabled:opacity-50"
           >
             <CreditCard className="w-4 h-4 sm:w-5 sm:h-5" />
-            {isSubmitting ? 'Отправляем заказ…' : `Оплатить ${totalPrice} ₽`}
+            {isCheckingOut ? 'Оформление…' : `Оплатить ${totalPrice} ₽`}
           </motion.button>
         </motion.div>
       )}

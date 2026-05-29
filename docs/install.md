@@ -75,7 +75,30 @@ docker compose down
 
 Для совместного запуска используется файл docker-compose.yml.
 
-## 8. Размещение проекта
+
+## 8. Продакшен на Render
+
+Развёрнутые сервисы:
+
+- backend: https://food-ordering-backend-jx2z.onrender.com
+- frontend: https://food-ordering-frontend-web.onrender.com
+- Swagger: https://food-ordering-backend-jx2z.onrender.com/docs
+- health-check: https://food-ordering-backend-jx2z.onrender.com/health
+
+На Render для **frontend** задайте (или используйте `frontend/.env.production`):
+
+`NEXT_PUBLIC_API_URL=https://food-ordering-backend-jx2z.onrender.com`
+
+На Render для **backend** (опционально, иначе подставится URL фронтенда по умолчанию):
+
+`FRONTEND_URL=https://food-ordering-frontend-web.onrender.com`
+
+Проверка:
+
+```bash
+curl https://food-ordering-backend-jx2z.onrender.com/health
+```
+## 9. Размещение проекта
 
 Frontend и backend размещены на Render.
 

@@ -3,32 +3,50 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { User, MapPin, Phone, Plus, Minus, ChevronRight, ChevronLeft, ShoppingBag, X } from 'lucide-react'
-import { useApp, RESTAURANT_PHONE, RESTAURANT_ADDRESS, RESTAURANT_COORDS } from '@/lib/app-context'
+import { useApp } from '@/lib/app-context'
 import { useCart } from '@/lib/cart-context'
-import { categories, menuItems, type MenuItem } from '@/lib/data'
+import { useMenu } from '@/lib/menu-context'
+import type { MenuItem } from '@/lib/data'
+import { groupItemsByCategory } from '@/lib/menu-grouping'
 import Image from 'next/image'
 
 const LOGO_URL = 'https://hebbkx1anhila5yf.public.blob.vercel-storage.com/Frame%202-ka88YF1wTzYyPws7x9erhGnno6h2HV.png'
 
+const DISH_PLACEHOLDER_IMAGE =
+  'https://habrastorage.org/r/w1560/getpro/habr/upload_files/cb0/f0b/c6f/cb0f0bc6f20ed4cb8b2d04e62efb4799.jpeg'
+
 export function MenuScreen() {
   const { setCurrentScreen } = useApp()
-  const { addItem, removeItem, getItemQuantity, totalItems, totalPrice } = useCart()
-  const [activeCategory, setActiveCategory] = useState(categories[0].slug)
+  const { addItem, updateQuantity, getItemQuantity, totalItems, totalPrice } = useCart()
+  const { categories, menuItems, restaurantInfo, hiddenCategories, loadMenuFromApi, menuLoading, menuError } = useMenu()
+
+  useEffect(() => {
+    loadMenuFromApi()
+  }, [loadMenuFromApi])
+
+  const [activeCategory, setActiveCategory] = useState('')
   const [selectedItem, setSelectedItem] = useState<MenuItem | null>(null)
   const categoryScrollRef = useRef<HTMLDivElement>(null)
   const menuContentRef = useRef<HTMLDivElement>(null)
   const categoryRefs = useRef<{ [key: string]: HTMLDivElement | null }>({})
   const isScrollingToCategory = useRef(false)
 
-  // Group menu items by category
-  const groupedMenu = categories.map(category => ({
-    ...category,
-    items: menuItems.filter(item => item.category === category.slug)
-  })).filter(category => category.items.length > 0)
+  const groupedMenu = groupItemsByCategory(categories, menuItems, {
+    hiddenCategoryIds: hiddenCategories,
+    hideEmpty: true,
+  })
+
+  // Keep active tab valid when menu loads or categories change
+  useEffect(() => {
+    if (!groupedMenu.some((g) => g.category.id === activeCategory)) {
+      const nextId = groupedMenu[0]?.category.id ?? ''
+      if (nextId) setActiveCategory(nextId)
+    }
+  }, [hiddenCategories, categories, activeCategory, groupedMenu])
 
   // Scroll category tab into view
-  const scrollCategoryTabIntoView = useCallback((slug: string) => {
-    const activeButton = document.querySelector(`[data-category="${slug}"]`)
+  const scrollCategoryTabIntoView = useCallback((categoryId: string) => {
+    const activeButton = document.querySelector(`[data-category="${categoryId}"]`)
     if (activeButton && categoryScrollRef.current) {
       const container = categoryScrollRef.current
       const buttonRect = activeButton.getBoundingClientRect()
@@ -41,11 +59,11 @@ export function MenuScreen() {
   }, [])
 
   // Handle category tab click - scroll to section
-  const handleCategoryClick = (slug: string) => {
+  const handleCategoryClick = (categoryId: string) => {
     isScrollingToCategory.current = true
-    setActiveCategory(slug)
+    setActiveCategory(categoryId)
     
-    const element = categoryRefs.current[slug]
+    const element = categoryRefs.current[categoryId]
     if (element && menuContentRef.current) {
       const headerHeight = 110
       const elementTop = element.getBoundingClientRect().top + window.scrollY - headerHeight
@@ -60,7 +78,7 @@ export function MenuScreen() {
       }, 500)
     }
     
-    scrollCategoryTabIntoView(slug)
+    scrollCategoryTabIntoView(categoryId)
   }
 
   // Update active category on scroll
@@ -71,15 +89,15 @@ export function MenuScreen() {
       const headerHeight = 130
       
       for (let i = groupedMenu.length - 1; i >= 0; i--) {
-        const category = groupedMenu[i]
-        const element = categoryRefs.current[category.slug]
-        
+        const { category } = groupedMenu[i]
+        const element = categoryRefs.current[category.id]
+
         if (element) {
           const rect = element.getBoundingClientRect()
           if (rect.top <= headerHeight) {
-            if (activeCategory !== category.slug) {
-              setActiveCategory(category.slug)
-              scrollCategoryTabIntoView(category.slug)
+            if (activeCategory !== category.id) {
+              setActiveCategory(category.id)
+              scrollCategoryTabIntoView(category.id)
             }
             break
           }
@@ -104,12 +122,12 @@ export function MenuScreen() {
 
   // Open phone dialer
   const handlePhoneClick = () => {
-    window.location.href = `tel:${RESTAURANT_PHONE.replace(/[^\d+]/g, '')}`
+    window.location.href = `tel:${restaurantInfo.phone.replace(/[^\d+]/g, '')}`
   }
 
   // Open maps
   const handleAddressClick = () => {
-    const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${RESTAURANT_COORDS}`
+    const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${restaurantInfo.coords}`
     window.open(mapsUrl, '_blank')
   }
 
@@ -137,21 +155,21 @@ export function MenuScreen() {
               className="flex items-center justify-center w-8 h-8 sm:w-auto sm:h-auto sm:gap-1 hover:text-[#D4AF37] transition-colors text-[#a1a1aa] sm:px-2 sm:py-1"
             >
               <MapPin className="w-4 h-4 sm:w-4 sm:h-4" />
-              <span className="hidden md:inline text-sm">{RESTAURANT_ADDRESS}</span>
+              <span className="hidden md:inline text-sm">{restaurantInfo.address}</span>
             </button>
             <button 
               onClick={handlePhoneClick}
               className="flex items-center justify-center w-8 h-8 sm:w-auto sm:h-auto sm:gap-1 hover:text-[#D4AF37] transition-colors text-[#a1a1aa] sm:px-2 sm:py-1"
             >
               <Phone className="w-4 h-4 sm:w-4 sm:h-4" />
-              <span className="hidden md:inline text-sm">{RESTAURANT_PHONE}</span>
+              <span className="hidden md:inline text-sm">{restaurantInfo.phone}</span>
             </button>
           </div>
 
           <div className="h-10 sm:h-12 aspect-[5/2] w-auto shrink-0 rounded-lg overflow-hidden">
             <Image
               src={LOGO_URL}
-              alt="MUCHACHO"
+              alt={restaurantInfo.name}
               width={250}
               height={100}
               className="h-full w-full object-cover"
@@ -172,13 +190,13 @@ export function MenuScreen() {
             ref={categoryScrollRef}
             className="flex gap-1.5 sm:gap-2 overflow-x-auto hide-scrollbar flex-1 px-1"
           >
-            {categories.map((category) => (
+            {groupedMenu.map(({ category }) => (
               <button
                 key={category.id}
-                data-category={category.slug}
-                onClick={() => handleCategoryClick(category.slug)}
+                data-category={category.id}
+                onClick={() => handleCategoryClick(category.id)}
                 className={`px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-full text-xs sm:text-sm font-medium whitespace-nowrap transition-all ${
-                  activeCategory === category.slug
+                  activeCategory === category.id
                     ? 'bg-[#D4AF37] text-black'
                     : 'text-[#a1a1aa] hover:text-white'
                 }`}
@@ -199,10 +217,19 @@ export function MenuScreen() {
 
       {/* Menu Content - All items in one list */}
       <main ref={menuContentRef} className="flex-1 px-2 sm:px-4 bg-[#0a0a0a]">
-        {groupedMenu.map((category, categoryIndex) => (
+        {menuLoading && (
+          <p className="text-center text-[#a1a1aa] py-12">Загрузка меню…</p>
+        )}
+        {!menuLoading && menuError && (
+          <p className="text-center text-red-400 py-12 px-4">{menuError}</p>
+        )}
+        {!menuLoading && !menuError && groupedMenu.length === 0 && (
+          <p className="text-center text-[#a1a1aa] py-12">Меню пока пусто</p>
+        )}
+        {!menuLoading && groupedMenu.map(({ category, items }, categoryIndex) => (
           <div
             key={category.id}
-            ref={(el) => { categoryRefs.current[category.slug] = el }}
+            ref={(el) => { categoryRefs.current[category.id] = el }}
           >
             {/* Category header - sticky with proper z-index below cart */}
             <div className={`sticky top-[88px] sm:top-[104px] z-10 bg-[#0a0a0a] ${categoryIndex === 0 ? 'pt-3 sm:pt-4' : 'pt-4 sm:pt-6'} pb-2 sm:pb-3`}>
@@ -212,7 +239,7 @@ export function MenuScreen() {
             </div>
             
             <div className="space-y-2 sm:space-y-3 pb-2">
-              {category.items.map((item) => {
+              {items.map((item) => {
                 const quantity = getItemQuantity(item.id)
                 
                 return (
@@ -240,7 +267,7 @@ export function MenuScreen() {
                         <div className="flex items-center gap-1 sm:gap-2 bg-white rounded-lg px-1.5 sm:px-2 py-0.5 sm:py-1 border border-[#ddd]">
                           <motion.button
                             whileTap={{ scale: 0.9 }}
-                            onClick={() => removeItem(item.id)}
+                            onClick={() => updateQuantity(item.id, quantity - 1)}
                             className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center text-[#D4AF37]"
                           >
                             <Minus className="w-4 h-4 sm:w-5 sm:h-5" />
@@ -338,7 +365,7 @@ export function MenuScreen() {
               {/* Item Image */}
               <div className="relative h-40 sm:h-56 bg-[#252525]">
                 <img
-                  src={selectedItem.image_url}
+                  src={selectedItem.image_url?.trim() || DISH_PLACEHOLDER_IMAGE}
                   alt={selectedItem.name}
                   className="w-full h-full object-cover"
                 />
@@ -419,7 +446,7 @@ export function MenuScreen() {
                     <div className="flex items-center gap-2 sm:gap-3 bg-[#252525] rounded-xl px-3 sm:px-4 py-1.5 sm:py-2">
                       <motion.button
                         whileTap={{ scale: 0.9 }}
-                        onClick={() => removeItem(selectedItem.id)}
+                        onClick={() => updateQuantity(selectedItem.id, getItemQuantity(selectedItem.id) - 1)}
                         className="w-8 h-8 sm:w-10 sm:h-10 flex items-center justify-center text-[#D4AF37]"
                       >
                         <Minus className="w-5 h-5 sm:w-6 sm:h-6" />
