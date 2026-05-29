@@ -12,6 +12,8 @@ out/
 # Environment
 .env
 .env.local
+.env*.local
+.vercel/
 
 # System
 .DS_Store
@@ -19,3 +21,9 @@ out/
 # IDE
 .idea/
 .vscode/
+
+# v0 / sandbox internal files
+__v0_runtime_loader.js
+__v0_devtools.tsx
+__v0_jsx-dev-runtime.ts
+.v0-trash/
