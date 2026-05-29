@@ -1,7 +1,9 @@
-import { reorder as reorderList } from '@hello-pangea/dnd'
-import type { Category, MenuItem } from './data'
-import type { CategoryGroup } from './menu-grouping'
-
+function reorderList<T>(list: T[], startIndex: number, endIndex: number): T[] {
+  const result = Array.from(list)
+  const [removed] = result.splice(startIndex, 1)
+  result.splice(endIndex, 0, removed)
+  return result
+}
 export type FlatEntry =
   | { kind: 'category'; id: string }
   | { kind: 'item'; id: string }
