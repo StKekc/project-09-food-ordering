@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 import models
@@ -185,6 +186,22 @@ async def _create_tables_on_startup() -> None:
                 """
             )
         )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE categories
+                ADD COLUMN IF NOT EXISTS position INTEGER NOT NULL DEFAULT 0
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE dishes
+                ADD COLUMN IF NOT EXISTS position INTEGER NOT NULL DEFAULT 0
+                """
+            )
+        )
 
 
 async def get_conn() -> AsyncConnection:
@@ -329,6 +346,86 @@ def _slugify_category_name(name: str) -> str:
     return slug or f"category-{uuid.uuid4().hex[:8]}"
 
 
+def _require_int_id(value: int, *, name: str = "id") -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid {name}: must be an integer",
+        ) from exc
+    if parsed < 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid {name}: must be a positive integer",
+        )
+    return parsed
+
+
+def _is_foreign_key_violation(exc: BaseException) -> bool:
+    if isinstance(exc, IntegrityError):
+        orig = getattr(exc, "orig", None)
+        if orig is not None:
+            code = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+            return code == "23503"
+    return False
+
+
+async def _clear_dish_dependencies(conn: AsyncConnection, dish_id: int) -> None:
+    await conn.execute(
+        text("DELETE FROM cart WHERE dish_id = :dish_id"),
+        {"dish_id": dish_id},
+    )
+    await conn.execute(
+        text("DELETE FROM order_items WHERE dish_id = :dish_id"),
+        {"dish_id": dish_id},
+    )
+
+
+async def _delete_dish_record(conn: AsyncConnection, dish_id: int) -> bool:
+    res = await conn.execute(
+        text("SELECT id FROM dishes WHERE id = :dish_id"),
+        {"dish_id": dish_id},
+    )
+    if res.mappings().first() is None:
+        return False
+
+    await _clear_dish_dependencies(conn, dish_id)
+    await conn.execute(
+        text("DELETE FROM dishes WHERE id = :dish_id"),
+        {"dish_id": dish_id},
+    )
+    return True
+
+
+async def _delete_category_record(conn: AsyncConnection, category_id: int) -> bool:
+    res = await conn.execute(
+        text("SELECT id FROM categories WHERE id = :category_id"),
+        {"category_id": category_id},
+    )
+    if res.mappings().first() is None:
+        return False
+
+    dishes_res = await conn.execute(
+        text("SELECT id FROM dishes WHERE category_id = :category_id"),
+        {"category_id": category_id},
+    )
+    dish_ids = [int(row["id"]) for row in dishes_res.mappings().all()]
+
+    for dish_id in dish_ids:
+        await _clear_dish_dependencies(conn, dish_id)
+
+    await conn.execute(
+        text("DELETE FROM dishes WHERE category_id = :category_id"),
+        {"category_id": category_id},
+    )
+    await conn.execute(
+        text("DELETE FROM categories WHERE id = :category_id"),
+        {"category_id": category_id},
+    )
+    return True
+
+
 class CategoryCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
 
@@ -340,12 +437,50 @@ class CategoryUpdate(BaseModel):
 class CategoryResponse(BaseModel):
     id: int
     name: str
+    position: int = 0
+
+
+class ReorderIdsRequest(BaseModel):
+    ids: list[int] = Field(min_length=1)
+
+
+class ReorderResponse(BaseModel):
+    updated: int
+
+
+async def _reorder_rows(
+    conn: AsyncConnection,
+    *,
+    table: Literal["categories", "dishes"],
+    ids: list[int],
+) -> int:
+    if len(ids) != len(set(ids)):
+        raise HTTPException(status_code=422, detail="Duplicate ids in reorder list")
+
+    res = await conn.execute(
+        text(f"SELECT id FROM {table} WHERE id = ANY(:ids)"),
+        {"ids": ids},
+    )
+    found = {int(r["id"]) for r in res.mappings().all()}
+    missing = [item_id for item_id in ids if item_id not in found]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail={"message": f"Some {table} not found", "ids": missing},
+        )
+
+    for position, item_id in enumerate(ids):
+        await conn.execute(
+            text(f"UPDATE {table} SET position = :position WHERE id = :id"),
+            {"position": position, "id": item_id},
+        )
+    return len(ids)
 
 
 @app.get("/categories", response_model=list[CategoryResponse])
 async def list_categories(conn: DbConn) -> list[CategoryResponse]:
     res = await conn.execute(
-        text("SELECT id, name FROM categories ORDER BY id ASC")
+        text("SELECT id, name, position FROM categories ORDER BY position ASC, id ASC")
     )
     rows = res.mappings().all()
     return [CategoryResponse(**r) for r in rows]
@@ -357,9 +492,14 @@ async def create_category(req: CategoryCreate, conn: DbConn) -> CategoryResponse
         res = await conn.execute(
             text(
                 """
-                INSERT INTO categories (restaurant_id, name, slug)
-                VALUES (:restaurant_id, :name, :slug)
-                RETURNING id, name
+                INSERT INTO categories (restaurant_id, name, slug, position)
+                VALUES (
+                  :restaurant_id,
+                  :name,
+                  :slug,
+                  (SELECT COALESCE(MAX(c.position), -1) + 1 FROM categories c WHERE c.restaurant_id = :restaurant_id)
+                )
+                RETURNING id, name, position
                 """
             ),
             {
@@ -376,6 +516,20 @@ async def create_category(req: CategoryCreate, conn: DbConn) -> CategoryResponse
         raise
 
 
+@app.put("/categories/reorder", response_model=ReorderResponse)
+async def reorder_categories(req: ReorderIdsRequest, conn: DbConn) -> ReorderResponse:
+    try:
+        updated = await _reorder_rows(conn, table="categories", ids=req.ids)
+        await conn.commit()
+        return ReorderResponse(updated=updated)
+    except HTTPException:
+        await conn.rollback()
+        raise
+    except Exception:
+        await conn.rollback()
+        raise
+
+
 @app.put("/categories/{category_id}", response_model=CategoryResponse)
 async def update_category(
     category_id: int, req: CategoryUpdate, conn: DbConn
@@ -387,7 +541,7 @@ async def update_category(
                 UPDATE categories
                 SET name = :name, slug = :slug
                 WHERE id = :category_id
-                RETURNING id, name
+                RETURNING id, name, position
                 """
             ),
             {
@@ -414,13 +568,11 @@ async def update_category(
 
 @app.delete("/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_category(category_id: int, conn: DbConn) -> None:
+    category_id = _require_int_id(category_id, name="category_id")
     try:
-        res = await conn.execute(
-            text("DELETE FROM categories WHERE id = :category_id RETURNING id"),
-            {"category_id": category_id},
-        )
-        row = res.mappings().one_or_none()
-        if row is None:
+        deleted = await _delete_category_record(conn, category_id)
+        if not deleted:
+            await conn.rollback()
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Category not found",
@@ -429,14 +581,29 @@ async def delete_category(category_id: int, conn: DbConn) -> None:
     except HTTPException:
         await conn.rollback()
         raise
-    except Exception:
+    except IntegrityError as exc:
         await conn.rollback()
-        raise
+        if _is_foreign_key_violation(exc):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot delete category: related records still exist",
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete category due to database constraints",
+        ) from exc
+    except Exception as exc:
+        await conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete category",
+        ) from exc
 
 
 class DishResponse(BaseModel):
     id: int
     category_id: int
+    position: int = 0
     name: str
     description: str | None
     price: Decimal
@@ -500,15 +667,16 @@ async def create_dish(req: DishCreate, conn: DbConn) -> DishResponse:
                 INSERT INTO dishes (
                   category_id, name, description, price, old_price, ingredients,
                   nutrition_info, weight_grams, is_available, is_recommended, is_spicy,
-                  popularity_score, image_url, preparation_time_min, is_active
+                  popularity_score, image_url, preparation_time_min, is_active, position
                 )
                 VALUES (
                   :category_id, :name, :description, :price, :old_price, :ingredients,
                   :nutrition_info, :weight_grams, :is_available, :is_recommended, :is_spicy,
-                  :popularity_score, :image_url, :preparation_time_min, :is_active
+                  :popularity_score, :image_url, :preparation_time_min, :is_active,
+                  (SELECT COALESCE(MAX(d.position), -1) + 1 FROM dishes d)
                 )
                 RETURNING
-                  id, category_id, name, description, price, old_price,
+                  id, category_id, position, name, description, price, old_price,
                   ingredients, nutrition_info, weight_grams,
                   is_available, is_active, is_recommended, is_spicy, popularity_score,
                   image_url, preparation_time_min, created_at, updated_at
@@ -519,6 +687,20 @@ async def create_dish(req: DishCreate, conn: DbConn) -> DishResponse:
         await conn.commit()
         row = res.mappings().one()
         return DishResponse(**row)
+    except Exception:
+        await conn.rollback()
+        raise
+
+
+@app.put("/dishes/reorder", response_model=ReorderResponse)
+async def reorder_dishes(req: ReorderIdsRequest, conn: DbConn) -> ReorderResponse:
+    try:
+        updated = await _reorder_rows(conn, table="dishes", ids=req.ids)
+        await conn.commit()
+        return ReorderResponse(updated=updated)
+    except HTTPException:
+        await conn.rollback()
+        raise
     except Exception:
         await conn.rollback()
         raise
@@ -554,7 +736,7 @@ async def update_dish(dish_id: int, req: DishUpdate, conn: DbConn) -> DishRespon
                   updated_at = NOW()
                 WHERE id = :dish_id
                 RETURNING
-                  id, category_id, name, description, price, old_price,
+                  id, category_id, position, name, description, price, old_price,
                   ingredients, nutrition_info, weight_grams,
                   is_available, is_active, is_recommended, is_spicy, popularity_score,
                   image_url, preparation_time_min, created_at, updated_at
@@ -577,18 +759,34 @@ async def update_dish(dish_id: int, req: DishUpdate, conn: DbConn) -> DishRespon
 
 @app.delete("/dishes/{dish_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_dish(dish_id: int, conn: DbConn) -> None:
+    dish_id = _require_int_id(dish_id, name="dish_id")
     try:
-        res = await conn.execute(text("DELETE FROM dishes WHERE id = :dish_id"), {"dish_id": dish_id})
-        if res.rowcount == 0:
+        deleted = await _delete_dish_record(conn, dish_id)
+        if not deleted:
             await conn.rollback()
             raise HTTPException(status_code=404, detail="Dish not found")
         await conn.commit()
         return None
     except HTTPException:
-        raise
-    except Exception:
         await conn.rollback()
         raise
+    except IntegrityError as exc:
+        await conn.rollback()
+        if _is_foreign_key_violation(exc):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot delete dish: related records still exist",
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete dish due to database constraints",
+        ) from exc
+    except Exception as exc:
+        await conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete dish",
+        ) from exc
 
 
 @app.get("/dishes", response_model=list[DishResponse])
@@ -624,14 +822,14 @@ async def list_dishes(
         text(
             f"""
             SELECT
-              d.id, d.category_id, d.name, d.description, d.price, d.old_price,
+              d.id, d.category_id, d.position, d.name, d.description, d.price, d.old_price,
               d.ingredients, d.nutrition_info, d.weight_grams,
               d.is_available, d.is_active, d.is_recommended, d.is_spicy, d.popularity_score,
               d.image_url, d.preparation_time_min, d.created_at, d.updated_at
             FROM dishes d
             JOIN categories c ON c.id = d.category_id
             {where_sql}
-            ORDER BY d.popularity_score DESC, d.id DESC
+            ORDER BY d.position ASC, d.id ASC
             LIMIT :limit OFFSET :offset
             """
         ),
@@ -684,6 +882,43 @@ class OrderHistoryEntry(BaseModel):
     delivery_type: str
     table_number: str | None
     items: list[OrderHistoryItem]
+
+
+class OrderStatusUpdateRequest(BaseModel):
+    status: str = Field(min_length=1, max_length=50)
+
+
+class OrderStatusUpdateResponse(BaseModel):
+    id: int
+    order_number: str
+    status: str
+
+
+_ORDER_STATUS_ALIASES: dict[str, str] = {
+    "ready": "ready",
+    "готов": "ready",
+    "готово": "ready",
+    "preparing": "preparing",
+    "готовится": "preparing",
+    "accepted": "accepted",
+    "принят": "accepted",
+    "pending": "pending",
+    "completed": "completed",
+    "cancelled": "cancelled",
+}
+
+_ALLOWED_ORDER_STATUSES = frozenset(_ORDER_STATUS_ALIASES.values())
+
+
+def _normalize_order_status(raw: str) -> str:
+    key = raw.strip().lower()
+    normalized = _ORDER_STATUS_ALIASES.get(key, key)
+    if normalized not in _ALLOWED_ORDER_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status. Allowed: {', '.join(sorted(_ALLOWED_ORDER_STATUSES))}",
+        )
+    return normalized
 
 
 class RestaurantSettingsResponse(BaseModel):
@@ -982,6 +1217,35 @@ async def get_orders_history(conn: DbConn, phone: str) -> list[OrderHistoryEntry
         )
 
     return out
+
+
+@app.patch("/orders/{order_id}/status", response_model=OrderStatusUpdateResponse)
+async def update_order_status(
+    order_id: int,
+    req: OrderStatusUpdateRequest,
+    conn: DbConn,
+) -> OrderStatusUpdateResponse:
+    new_status = _normalize_order_status(req.status)
+    res = await conn.execute(
+        text(
+            """
+            UPDATE orders
+            SET status = :status
+            WHERE id = :order_id
+            RETURNING id, order_number, status
+            """
+        ),
+        {"order_id": order_id, "status": new_status},
+    )
+    row = res.mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    await conn.commit()
+    return OrderStatusUpdateResponse(
+        id=int(row["id"]),
+        order_number=str(row["order_number"]),
+        status=str(row["status"]),
+    )
 
 
 @app.get("/health")

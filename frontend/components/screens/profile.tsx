@@ -11,6 +11,7 @@ import {
   birthdayToIso,
   mapUserResponseToSession,
 } from '@/lib/users-api'
+import { EMAIL_VALIDATION_ERROR, isValidEmail } from '@/lib/email-validation'
 
 export function ProfileScreen() {
   const { setCurrentScreen, userProfile, setUserProfile, setUserId, setIsAdmin, phone, logout } = useApp()
@@ -25,6 +26,11 @@ export function ProfileScreen() {
   const handleSave = async () => {
     if (!phone) {
       setSaveError('Номер телефона не указан')
+      return
+    }
+
+    if (!isValidEmail(email)) {
+      setSaveError(EMAIL_VALIDATION_ERROR)
       return
     }
 
@@ -174,7 +180,10 @@ export function ProfileScreen() {
         <input
           type="email"
           value={email}
-          onChange={(e) => setEmail(e.target.value)}
+          onChange={(e) => {
+            setEmail(e.target.value)
+            if (saveError) setSaveError(null)
+          }}
           placeholder="example@mail.com"
           className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg sm:rounded-xl px-3 sm:px-4 py-3 sm:py-4 text-sm sm:text-base text-white placeholder-[#666] focus:outline-none focus:border-[#D4AF37] transition-colors"
         />

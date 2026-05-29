@@ -42,7 +42,9 @@ interface AppContextType {
   userId: number | null
   setUserId: (id: number | null) => void
   orderHistory: HistoryOrder[]
+  setOrderHistory: (orders: HistoryOrder[]) => void
   addToOrderHistory: (order: HistoryOrder) => void
+  updateOrderStatusById: (orderId: string, status: Order['status']) => void
   isAdmin: boolean
   setIsAdmin: (value: boolean) => void
   adminPhones: string[]
@@ -72,13 +74,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     role: 'user',
   })
   const [userId, setUserId] = useState<number | null>(null)
-  const [orderHistory, setOrderHistory] = useState<HistoryOrder[]>([])
+  const [orderHistory, setOrderHistoryState] = useState<HistoryOrder[]>([])
   const [isAdmin, setIsAdmin] = useState(false)
   // Default admin phone - can be extended via admin panel
   const [adminPhones, setAdminPhones] = useState<string[]>(['+7 (999) 999-99-99'])
 
+  const setOrderHistory = useCallback((orders: HistoryOrder[]) => {
+    setOrderHistoryState(orders)
+  }, [])
+
   const addToOrderHistory = useCallback((order: HistoryOrder) => {
-    setOrderHistory(prev => [order, ...prev])
+    setOrderHistoryState(prev => [order, ...prev])
+  }, [])
+
+  const updateOrderStatusById = useCallback((orderId: string, status: Order['status']) => {
+    setCurrentOrder(prev => (prev?.id === orderId ? { ...prev, status } : prev))
+    setOrderHistoryState(prev =>
+      prev.map(order => (order.id === orderId ? { ...order, status } : order))
+    )
   }, [])
 
   const addAdminPhone = useCallback((newPhone: string) => {
@@ -124,7 +137,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         userId,
         setUserId,
         orderHistory,
+        setOrderHistory,
         addToOrderHistory,
+        updateOrderStatusById,
         isAdmin,
         setIsAdmin,
         adminPhones,

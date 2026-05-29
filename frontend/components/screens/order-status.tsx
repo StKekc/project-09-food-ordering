@@ -1,9 +1,10 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { Check, Clock, ChefHat, PartyPopper, Home, UtensilsCrossed, ShoppingBag } from 'lucide-react'
 import { useApp } from '@/lib/app-context'
+import { updateOrderStatus } from '@/lib/orders-api'
 
 type OrderStatus = 'accepted' | 'preparing' | 'ready'
 
@@ -29,8 +30,9 @@ const statusConfig = {
 }
 
 export function OrderStatusScreen() {
-  const { currentOrder, setCurrentScreen, setCurrentOrder } = useApp()
+  const { currentOrder, setCurrentScreen, setCurrentOrder, updateOrderStatusById } = useApp()
   const [status, setStatus] = useState<OrderStatus>(currentOrder?.status || 'accepted')
+  const readySyncedRef = useRef(false)
 
   // Simulate order progress
   useEffect(() => {
@@ -43,6 +45,24 @@ export function OrderStatusScreen() {
       return () => clearTimeout(timer)
     }
   }, [status])
+
+  useEffect(() => {
+    if (status !== 'ready' || !currentOrder || readySyncedRef.current) return
+    readySyncedRef.current = true
+
+    const syncReadyStatus = async () => {
+      updateOrderStatusById(currentOrder.id, 'ready')
+      setCurrentOrder({ ...currentOrder, status: 'ready' })
+
+      try {
+        await updateOrderStatus(currentOrder.id, 'ready')
+      } catch (err) {
+        console.error('Не удалось обновить статус заказа на сервере:', err)
+      }
+    }
+
+    void syncReadyStatus()
+  }, [status, currentOrder, setCurrentOrder, updateOrderStatusById])
 
   const handleNewOrder = () => {
     setCurrentOrder(null)

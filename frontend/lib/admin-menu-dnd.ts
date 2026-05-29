@@ -1,4 +1,6 @@
+import { reorder as reorderList } from '@hello-pangea/dnd'
 import type { Category, MenuItem } from './data'
+import type { CategoryGroup } from './menu-grouping'
 
 export type FlatEntry =
   | { kind: 'category'; id: string }
@@ -130,4 +132,44 @@ export function flatToLayout(
   }
 
   return { orderedCategoryIds, orderedItems }
+}
+
+export function layoutFromGroups(groups: CategoryGroup[]) {
+  return {
+    orderedCategoryIds: groups.map((g) => g.category.id),
+    orderedItems: groups.flatMap((g) =>
+      g.items.map((item) => ({ id: item.id, categoryId: g.category.id }))
+    ),
+  }
+}
+
+export function reorderCategoryGroups(
+  groups: CategoryGroup[],
+  sourceIndex: number,
+  destinationIndex: number
+): CategoryGroup[] {
+  return reorderList(groups, sourceIndex, destinationIndex)
+}
+
+export function moveItemInGroups(
+  groups: CategoryGroup[],
+  source: { droppableId: string; index: number },
+  destination: { droppableId: string; index: number }
+): CategoryGroup[] {
+  const sourceCategoryId = source.droppableId.replace(/^items-/, '')
+  const destCategoryId = destination.droppableId.replace(/^items-/, '')
+
+  const next = groups.map((g) => ({ ...g, items: [...g.items] }))
+  const sourceGroup = next.find((g) => g.category.id === sourceCategoryId)
+  const destGroup = next.find((g) => g.category.id === destCategoryId)
+  if (!sourceGroup || !destGroup) return groups
+
+  const [moved] = sourceGroup.items.splice(source.index, 1)
+  if (!moved) return groups
+
+  destGroup.items.splice(destination.index, 0, {
+    ...moved,
+    category_id: destCategoryId,
+  })
+  return next
 }

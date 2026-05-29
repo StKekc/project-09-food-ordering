@@ -81,6 +81,24 @@ export async function fetchCategories(): Promise<ApiCategoryResponse[]> {
   return res.json()
 }
 
+export async function reorderCategories(ids: number[]): Promise<void> {
+  const res = await fetch(`${apiBase()}/categories/reorder`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  })
+  if (!res.ok) throw new Error(await parseError(res))
+}
+
+export async function reorderDishes(ids: number[]): Promise<void> {
+  const res = await fetch(`${apiBase()}/dishes/reorder`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  })
+  if (!res.ok) throw new Error(await parseError(res))
+}
+
 export async function fetchDishes(options?: {
   available_only?: boolean
   include_inactive?: boolean
@@ -123,6 +141,35 @@ export async function updateDish(
   })
   if (!res.ok) throw new Error(await parseError(res))
   return res.json()
+}
+
+export async function persistMenuLayoutOrder(
+  orderedCategoryIds: string[],
+  orderedItems: { id: string; categoryId: string }[],
+  previousItems: MenuItem[]
+): Promise<void> {
+  const categoryIds = orderedCategoryIds
+    .map((id) => parseInt(id, 10))
+    .filter((id) => Number.isFinite(id))
+  const dishIds = orderedItems
+    .map((item) => parseInt(item.id, 10))
+    .filter((id) => Number.isFinite(id))
+
+  if (categoryIds.length === 0 || dishIds.length === 0) return
+
+  const prevById = new Map(previousItems.map((item) => [item.id, item]))
+  const categoryMoves = orderedItems.filter(({ id, categoryId }) => {
+    const prev = prevById.get(id)
+    return prev && String(prev.category_id) !== String(categoryId)
+  })
+
+  await Promise.all([
+    reorderCategories(categoryIds),
+    reorderDishes(dishIds),
+    ...categoryMoves.map(({ id, categoryId }) =>
+      updateDish(id, { category_id: parseInt(categoryId, 10) })
+    ),
+  ])
 }
 
 export async function deleteDishApi(dishId: string): Promise<void> {
