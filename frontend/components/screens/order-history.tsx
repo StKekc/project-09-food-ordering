@@ -4,12 +4,10 @@ import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import { ArrowLeft, Clock, ShoppingBag } from 'lucide-react'
 import { useApp } from '@/lib/app-context'
-import type { HistoryOrder } from '@/lib/app-context'
 import { fetchOrderHistory } from '@/lib/users-api'
 
 export function OrderHistoryScreen() {
-  const { setCurrentScreen, phone } = useApp()
-  const [orders, setOrders] = useState<HistoryOrder[]>([])
+  const { setCurrentScreen, phone, orderHistory, setOrderHistory } = useApp()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -25,11 +23,11 @@ export function OrderHistoryScreen() {
 
     fetchOrderHistory(phone)
       .then(data => {
-        if (!cancelled) setOrders(data)
+        if (!cancelled) setOrderHistory(data)
       })
       .catch(err => {
         if (!cancelled) {
-          setOrders([])
+          setOrderHistory([])
           setError(err instanceof Error ? err.message : 'Не удалось загрузить историю')
         }
       })
@@ -40,7 +38,7 @@ export function OrderHistoryScreen() {
     return () => {
       cancelled = true
     }
-  }, [phone])
+  }, [phone, setOrderHistory])
 
   return (
     <div className="min-h-screen flex flex-col px-4 sm:px-6 py-6 sm:py-8 max-w-md mx-auto">
@@ -67,7 +65,7 @@ export function OrderHistoryScreen() {
         <p className="text-center text-red-400 py-12 px-4">{error}</p>
       )}
 
-      {!loading && !error && orders.length === 0 && (
+      {!loading && !error && orderHistory.length === 0 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -81,9 +79,9 @@ export function OrderHistoryScreen() {
         </motion.div>
       )}
 
-      {!loading && !error && orders.length > 0 && (
+      {!loading && !error && orderHistory.length > 0 && (
         <div className="space-y-3 sm:space-y-4">
-          {orders.map((order, index) => (
+          {orderHistory.map((order, index) => (
             <motion.div
               key={order.id}
               initial={{ opacity: 0, y: 20 }}

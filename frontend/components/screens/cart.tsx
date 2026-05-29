@@ -23,6 +23,7 @@ export function CartScreen() {
     orderType,
     setOrderType,
     setCurrentOrder,
+    addToOrderHistory,
     phone,
     userProfile,
     userId,
@@ -112,9 +113,17 @@ export function CartScreen() {
         type: orderType,
         status: 'accepted' as const,
         orderNumber: created.order_number,
+        date: new Date().toLocaleString('ru-RU', {
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
       }
 
       setCurrentOrder(order)
+      addToOrderHistory(order)
       clearCart()
       setCurrentScreen('order-status')
     } catch (err) {

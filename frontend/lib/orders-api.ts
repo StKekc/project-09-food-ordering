@@ -57,3 +57,22 @@ export async function createOrder(payload: OrderCreatePayload): Promise<OrderCre
   if (!res.ok) throw new Error(await parseError(res))
   return res.json()
 }
+
+export interface OrderStatusUpdateResponse {
+  id: number
+  order_number: string
+  status: string
+}
+
+export async function updateOrderStatus(
+  orderId: number | string,
+  status: 'ready' | 'готов' | string
+): Promise<OrderStatusUpdateResponse> {
+  const res = await fetch(`${apiBase()}/orders/${orderId}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  })
+  if (!res.ok) throw new Error(await parseError(res))
+  return res.json()
+}

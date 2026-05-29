@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { DragDropContext, Droppable, Draggable, type DropResult } from '@hello-pangea/dnd'
 import { motion, AnimatePresence } from 'framer-motion'
 import { 
   ArrowLeft, 
@@ -21,13 +22,15 @@ import { useApp } from '@/lib/app-context'
 import { useMenu, type RestaurantInfo } from '@/lib/menu-context'
 import type { MenuItem, Category } from '@/lib/data'
 import {
-  buildFlatList,
-  flatToLayout,
-  getDropPosition,
-  reorderFlatList,
-  type DropTarget,
+  layoutFromGroups,
+  moveItemInGroups,
+  reorderCategoryGroups,
 } from '@/lib/admin-menu-dnd'
-import { apiCategoryToCategory, parseWeightGrams } from '@/lib/dishes-api'
+import {
+  apiCategoryToCategory,
+  parseWeightGrams,
+  persistMenuLayoutOrder,
+} from '@/lib/dishes-api'
 import { groupItemsByCategory } from '@/lib/menu-grouping'
 
 type EditMode = 'none' | 'info' | 'category' | 'item' | 'admins'
@@ -96,9 +99,8 @@ export function AdminScreen() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [newAdminPhone, setNewAdminPhone] = useState('')
-  const [draggedItem, setDraggedItem] = useState<{ type: 'category' | 'item', id: string } | null>(null)
-  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
   const [saving, setSaving] = useState(false)
+  const [reorderSaving, setReorderSaving] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [localCategories, setLocalCategories] = useState(categories)
   const [localMenuItems, setLocalMenuItems] = useState(menuItems)
@@ -624,68 +626,70 @@ export function AdminScreen() {
     }
   }
 
-  const getDropHighlight = (kind: 'category' | 'item', id: string) => {
-    if (!dropTarget || dropTarget.kind !== kind || dropTarget.id !== id) return ''
-    return dropTarget.position === 'before'
-      ? 'ring-2 ring-inset ring-[#D4AF37]'
-      : 'ring-2 ring-inset ring-[#D4AF37]'
-  }
+  const handleMenuDragEnd = useCallback(
+    async (result: DropResult) => {
+      const { source, destination, type } = result
+      if (!destination) return
+      if (
+        source.droppableId === destination.droppableId &&
+        source.index === destination.index
+      ) {
+        return
+      }
 
-  const handleDragStart = (
-    e: React.DragEvent,
-    type: 'category' | 'item',
-    id: string
-  ) => {
-    e.stopPropagation()
-    e.dataTransfer.effectAllowed = 'move'
-    e.dataTransfer.setData('text/plain', id)
-    setDraggedItem({ type, id })
-  }
+      const previousItems = localMenuItems
+      let nextGroups = groupedItems
 
-  const handleDragOver = (
-    e: React.DragEvent,
-    kind: 'category' | 'item',
-    id: string
-  ) => {
-    e.preventDefault()
-    e.stopPropagation()
-    if (!draggedItem) return
-    if (draggedItem.type === 'category' && kind === 'item') return
-    if (draggedItem.type === kind && draggedItem.id === id) return
+      if (type === 'CATEGORY') {
+        nextGroups = reorderCategoryGroups(
+          groupedItems,
+          source.index,
+          destination.index
+        )
+      } else if (type === 'ITEM') {
+        nextGroups = moveItemInGroups(groupedItems, source, destination)
+      } else {
+        return
+      }
 
-    e.dataTransfer.dropEffect = 'move'
-    setDropTarget({ kind, id, position: getDropPosition(e) })
-  }
+      const layout = layoutFromGroups(nextGroups)
+      applyMenuLayout(layout.orderedCategoryIds, layout.orderedItems)
 
-  const handleDrop = (
-    e: React.DragEvent,
-    kind: 'category' | 'item',
-    id: string
-  ) => {
-    e.preventDefault()
-    e.stopPropagation()
-    if (!draggedItem) return
-    if (draggedItem.type === 'category' && kind === 'item') return
+      if (!API_URL) {
+        setActionError('NEXT_PUBLIC_API_URL не настроен')
+        return
+      }
 
-    const target: DropTarget = {
-      kind,
-      id,
-      position: getDropPosition(e),
-    }
-
-    const flat = buildFlatList(groupedItems)
-    const reordered = reorderFlatList(flat, draggedItem, target)
-    const layout = flatToLayout(reordered, localCategories, localMenuItems)
-    applyMenuLayout(layout.orderedCategoryIds, layout.orderedItems)
-
-    setDraggedItem(null)
-    setDropTarget(null)
-  }
-
-  const handleDragEnd = useCallback(() => {
-    setDraggedItem(null)
-    setDropTarget(null)
-  }, [])
+      setReorderSaving(true)
+      setActionError(null)
+      try {
+        await persistMenuLayoutOrder(
+          layout.orderedCategoryIds,
+          layout.orderedItems,
+          previousItems
+        )
+        await Promise.all([loadCategoriesFromApi(), refreshDishesFromApi()])
+      } catch (err) {
+        setActionError(
+          err instanceof Error ? err.message : 'Не удалось сохранить порядок меню'
+        )
+        try {
+          await Promise.all([loadCategoriesFromApi(), refreshDishesFromApi()])
+        } catch {
+          /* keep optimistic UI if refresh fails */
+        }
+      } finally {
+        setReorderSaving(false)
+      }
+    },
+    [
+      groupedItems,
+      localMenuItems,
+      applyMenuLayout,
+      loadCategoriesFromApi,
+      refreshDishesFromApi,
+    ]
+  )
 
   // Render admins edit screen
   if (editMode === 'admins') {
@@ -1145,152 +1149,239 @@ export function AdminScreen() {
             {actionError}
           </p>
         )}
-        {groupedItems.map((group) => (
-          <div key={group.category.id} className="mb-4">
-            {/* Category Header */}
-            <div
-              className={`flex items-center justify-between bg-[#1a1a1a] rounded-xl px-4 py-3 mb-2 ${getDropHighlight('category', group.category.id)} ${
-                draggedItem?.type === 'category' && draggedItem.id === group.category.id ? 'opacity-40' : ''
-              }`}
-              onDragOver={(e) => handleDragOver(e, 'category', group.category.id)}
-              onDrop={(e) => handleDrop(e, 'category', group.category.id)}
-            >
-              <span className={`font-semibold text-white ${hiddenCategories.has(group.category.id) ? 'opacity-50' : ''}`}>
-                {group.category.name}
-                {hiddenCategories.has(group.category.id) && (
-                  <span className="ml-2 text-xs bg-gray-500/20 text-gray-400 px-2 py-0.5 rounded">СКРЫТ</span>
-                )}
-              </span>
-              <div className="flex items-center gap-2">
-                <div className="relative z-[60]">
-                  <button
-                    onClick={() => setActiveMenu(activeMenu === `cat-${group.category.id}` ? null : `cat-${group.category.id}`)}
-                    className="w-8 h-8 flex items-center justify-center text-[#666] hover:text-white"
+        {reorderSaving && (
+          <p className="mb-3 text-sm text-[#D4AF37]">Сохранение порядка меню…</p>
+        )}
+        <DragDropContext onDragEnd={handleMenuDragEnd}>
+          <Droppable droppableId="categories" type="CATEGORY">
+            {(catDropProvided) => (
+              <div ref={catDropProvided.innerRef} {...catDropProvided.droppableProps}>
+                {groupedItems.map((group, categoryIndex) => (
+                  <Draggable
+                    key={group.category.id}
+                    draggableId={`category-${group.category.id}`}
+                    index={categoryIndex}
+                    isDragDisabled={reorderSaving}
                   >
-                    <MoreVertical className="w-5 h-5" />
-                  </button>
-                  <AnimatePresence>
-                    {activeMenu === `cat-${group.category.id}` && (
-                      <motion.div
-                        initial={{ opacity: 0, scale: 0.95 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.95 }}
-                        className="absolute right-0 top-10 z-[60] bg-[#1a1a1a] border border-[#333] rounded-xl shadow-xl overflow-hidden min-w-[200px]"
-                        onClick={(e) => e.stopPropagation()}
+                    {(catProvided, catSnapshot) => (
+                      <div
+                        ref={catProvided.innerRef}
+                        {...catProvided.draggableProps}
+                        className={`mb-4 ${catSnapshot.isDragging ? 'opacity-60' : ''}`}
                       >
-                        <button
-                          onClick={() => handleMenuAction('edit', 'category', group.category.id)}
-                          className="w-full flex items-center gap-3 px-4 py-3 text-white hover:bg-[#252525] text-left"
-                        >
-                          <Edit3 className="w-4 h-4" />
-                          Редактировать
-                        </button>
-                        <button
-                          onClick={() => handleMenuAction('hide', 'category', group.category.id)}
-                          className="w-full flex items-center gap-3 px-4 py-3 text-yellow-400 hover:bg-[#252525] text-left"
-                        >
-                          <EyeOff className="w-4 h-4" />
-                          {hiddenCategories.has(group.category.id) ? 'Показать раздел' : 'Скрыть раздел'}
-                        </button>
-                        <button
-                          onClick={() => handleMenuAction('delete', 'category', group.category.id)}
-                          className="w-full flex items-center gap-3 px-4 py-3 text-red-400 hover:bg-[#252525] text-left"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                          Удалить
-                        </button>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
-                <div
-                  draggable
-                  onDragStart={(e) => handleDragStart(e, 'category', group.category.id)}
-                  onDragEnd={handleDragEnd}
-                  className="w-8 h-8 flex items-center justify-center text-[#666] cursor-grab active:cursor-grabbing touch-none"
-                >
-                  <Equal className="w-5 h-5 pointer-events-none" />
-                </div>
-              </div>
-            </div>
-
-            {/* Items in Category */}
-            {group.items.map((item) => (
-              <div
-                key={item.id}
-                onDragOver={(e) => handleDragOver(e, 'item', item.id)}
-                onDrop={(e) => handleDrop(e, 'item', item.id)}
-                className={`flex items-center justify-between rounded-xl px-4 py-3 mb-2 ${
-                  stoppedItems.has(item.id) ? 'bg-[#e5dfd0]' : 'bg-[#FFF8E7]'
-                } ${getDropHighlight('item', item.id)} ${
-                  draggedItem?.type === 'item' && draggedItem.id === item.id ? 'opacity-40' : ''
-                }`}
-              >
-                <div className={`flex-1 ${stoppedItems.has(item.id) ? 'opacity-50' : ''}`}>
-                  <span className="font-medium text-black">{item.name}</span>
-                  {stoppedItems.has(item.id) && (
-                    <span className="ml-2 text-xs bg-red-500/20 text-red-600 px-2 py-0.5 rounded">СТОП</span>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className={`text-black font-semibold ${stoppedItems.has(item.id) ? 'opacity-50' : ''}`}>{item.price} P</span>
-                  <div className="relative z-[60]">
-                    <button
-                      onClick={() => setActiveMenu(activeMenu === `item-${item.id}` ? null : `item-${item.id}`)}
-                      className="w-8 h-8 flex items-center justify-center text-[#999] hover:text-black"
-                    >
-                      <MoreVertical className="w-5 h-5" />
-                    </button>
-                    <AnimatePresence>
-                      {activeMenu === `item-${item.id}` && (
-                        <motion.div
-                          initial={{ opacity: 0, scale: 0.95 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          exit={{ opacity: 0, scale: 0.95 }}
-                          className="absolute right-0 top-10 z-[60] bg-[#1a1a1a] border border-[#333] rounded-xl shadow-xl overflow-hidden min-w-[200px]"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <div className="px-4 py-2 border-b border-[#333]">
-                            <span className="text-white font-medium text-sm">{item.name}</span>
+                        <div className="flex items-center justify-between bg-[#1a1a1a] rounded-xl px-4 py-3 mb-2">
+                          <span
+                            className={`font-semibold text-white ${
+                              hiddenCategories.has(group.category.id) ? 'opacity-50' : ''
+                            }`}
+                          >
+                            {group.category.name}
+                            {hiddenCategories.has(group.category.id) && (
+                              <span className="ml-2 text-xs bg-gray-500/20 text-gray-400 px-2 py-0.5 rounded">
+                                СКРЫТ
+                              </span>
+                            )}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <div className="relative z-[60]">
+                              <button
+                                onClick={() =>
+                                  setActiveMenu(
+                                    activeMenu === `cat-${group.category.id}`
+                                      ? null
+                                      : `cat-${group.category.id}`
+                                  )
+                                }
+                                className="w-8 h-8 flex items-center justify-center text-[#666] hover:text-white"
+                              >
+                                <MoreVertical className="w-5 h-5" />
+                              </button>
+                              <AnimatePresence>
+                                {activeMenu === `cat-${group.category.id}` && (
+                                  <motion.div
+                                    initial={{ opacity: 0, scale: 0.95 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    exit={{ opacity: 0, scale: 0.95 }}
+                                    className="absolute right-0 top-10 z-[60] bg-[#1a1a1a] border border-[#333] rounded-xl shadow-xl overflow-hidden min-w-[200px]"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <button
+                                      onClick={() =>
+                                        handleMenuAction('edit', 'category', group.category.id)
+                                      }
+                                      className="w-full flex items-center gap-3 px-4 py-3 text-white hover:bg-[#252525] text-left"
+                                    >
+                                      <Edit3 className="w-4 h-4" />
+                                      Редактировать
+                                    </button>
+                                    <button
+                                      onClick={() =>
+                                        handleMenuAction('hide', 'category', group.category.id)
+                                      }
+                                      className="w-full flex items-center gap-3 px-4 py-3 text-yellow-400 hover:bg-[#252525] text-left"
+                                    >
+                                      <EyeOff className="w-4 h-4" />
+                                      {hiddenCategories.has(group.category.id)
+                                        ? 'Показать раздел'
+                                        : 'Скрыть раздел'}
+                                    </button>
+                                    <button
+                                      onClick={() =>
+                                        handleMenuAction('delete', 'category', group.category.id)
+                                      }
+                                      className="w-full flex items-center gap-3 px-4 py-3 text-red-400 hover:bg-[#252525] text-left"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                      Удалить
+                                    </button>
+                                  </motion.div>
+                                )}
+                              </AnimatePresence>
+                            </div>
+                            <div
+                              {...catProvided.dragHandleProps}
+                              className="w-8 h-8 flex items-center justify-center text-[#666] cursor-grab active:cursor-grabbing touch-none"
+                            >
+                              <Equal className="w-5 h-5 pointer-events-none" />
+                            </div>
                           </div>
-                          <button
-                            onClick={() => handleMenuAction('edit', 'item', item.id)}
-                            className="w-full flex items-center gap-3 px-4 py-3 text-white hover:bg-[#252525] text-left"
-                          >
-                            <Edit3 className="w-4 h-4" />
-                            Редактировать позицию
-                          </button>
-                          <button
-                            onClick={() => handleMenuAction('stop', 'item', item.id)}
-                            className="w-full flex items-center gap-3 px-4 py-3 text-yellow-400 hover:bg-[#252525] text-left"
-                          >
-                            <StopCircle className="w-4 h-4" />
-                            {stoppedItems.has(item.id) ? 'Снять со стопа' : 'Поставить на стоп'}
-                          </button>
-                          <button
-                            onClick={() => handleMenuAction('delete', 'item', item.id)}
-                            className="w-full flex items-center gap-3 px-4 py-3 text-red-400 hover:bg-[#252525] text-left"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                            Удалить позицию
-                          </button>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </div>
-                  <div
-                    draggable
-                    onDragStart={(e) => handleDragStart(e, 'item', item.id)}
-                    onDragEnd={handleDragEnd}
-                    className="w-8 h-8 flex items-center justify-center text-[#999] cursor-grab active:cursor-grabbing touch-none"
-                  >
-                    <Equal className="w-5 h-5 pointer-events-none" />
-                  </div>
-                </div>
+                        </div>
+
+                        <Droppable
+                          droppableId={`items-${group.category.id}`}
+                          type="ITEM"
+                        >
+                          {(itemDropProvided, itemDropSnapshot) => (
+                            <div
+                              ref={itemDropProvided.innerRef}
+                              {...itemDropProvided.droppableProps}
+                              className={
+                                itemDropSnapshot.isDraggingOver
+                                  ? 'rounded-xl ring-2 ring-inset ring-[#D4AF37]/40'
+                                  : ''
+                              }
+                            >
+                              {group.items.map((item, itemIndex) => (
+                                <Draggable
+                                  key={item.id}
+                                  draggableId={`item-${item.id}`}
+                                  index={itemIndex}
+                                  isDragDisabled={reorderSaving}
+                                >
+                                  {(itemProvided, itemSnapshot) => (
+                                    <div
+                                      ref={itemProvided.innerRef}
+                                      {...itemProvided.draggableProps}
+                                      className={`flex items-center justify-between rounded-xl px-4 py-3 mb-2 ${
+                                        stoppedItems.has(item.id)
+                                          ? 'bg-[#e5dfd0]'
+                                          : 'bg-[#FFF8E7]'
+                                      } ${itemSnapshot.isDragging ? 'opacity-60 shadow-lg' : ''}`}
+                                    >
+                                      <div
+                                        className={`flex-1 ${
+                                          stoppedItems.has(item.id) ? 'opacity-50' : ''
+                                        }`}
+                                      >
+                                        <span className="font-medium text-black">{item.name}</span>
+                                        {stoppedItems.has(item.id) && (
+                                          <span className="ml-2 text-xs bg-red-500/20 text-red-600 px-2 py-0.5 rounded">
+                                            СТОП
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                        <span
+                                          className={`text-black font-semibold ${
+                                            stoppedItems.has(item.id) ? 'opacity-50' : ''
+                                          }`}
+                                        >
+                                          {item.price} P
+                                        </span>
+                                        <div className="relative z-[60]">
+                                          <button
+                                            onClick={() =>
+                                              setActiveMenu(
+                                                activeMenu === `item-${item.id}`
+                                                  ? null
+                                                  : `item-${item.id}`
+                                              )
+                                            }
+                                            className="w-8 h-8 flex items-center justify-center text-[#999] hover:text-black"
+                                          >
+                                            <MoreVertical className="w-5 h-5" />
+                                          </button>
+                                          <AnimatePresence>
+                                            {activeMenu === `item-${item.id}` && (
+                                              <motion.div
+                                                initial={{ opacity: 0, scale: 0.95 }}
+                                                animate={{ opacity: 1, scale: 1 }}
+                                                exit={{ opacity: 0, scale: 0.95 }}
+                                                className="absolute right-0 top-10 z-[60] bg-[#1a1a1a] border border-[#333] rounded-xl shadow-xl overflow-hidden min-w-[200px]"
+                                                onClick={(e) => e.stopPropagation()}
+                                              >
+                                                <div className="px-4 py-2 border-b border-[#333]">
+                                                  <span className="text-white font-medium text-sm">
+                                                    {item.name}
+                                                  </span>
+                                                </div>
+                                                <button
+                                                  onClick={() =>
+                                                    handleMenuAction('edit', 'item', item.id)
+                                                  }
+                                                  className="w-full flex items-center gap-3 px-4 py-3 text-white hover:bg-[#252525] text-left"
+                                                >
+                                                  <Edit3 className="w-4 h-4" />
+                                                  Редактировать позицию
+                                                </button>
+                                                <button
+                                                  onClick={() =>
+                                                    handleMenuAction('stop', 'item', item.id)
+                                                  }
+                                                  className="w-full flex items-center gap-3 px-4 py-3 text-yellow-400 hover:bg-[#252525] text-left"
+                                                >
+                                                  <StopCircle className="w-4 h-4" />
+                                                  {stoppedItems.has(item.id)
+                                                    ? 'Снять со стопа'
+                                                    : 'Поставить на стоп'}
+                                                </button>
+                                                <button
+                                                  onClick={() =>
+                                                    handleMenuAction('delete', 'item', item.id)
+                                                  }
+                                                  className="w-full flex items-center gap-3 px-4 py-3 text-red-400 hover:bg-[#252525] text-left"
+                                                >
+                                                  <Trash2 className="w-4 h-4" />
+                                                  Удалить позицию
+                                                </button>
+                                              </motion.div>
+                                            )}
+                                          </AnimatePresence>
+                                        </div>
+                                        <div
+                                          {...itemProvided.dragHandleProps}
+                                          className="w-8 h-8 flex items-center justify-center text-[#999] cursor-grab active:cursor-grabbing touch-none"
+                                        >
+                                          <Equal className="w-5 h-5 pointer-events-none" />
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )}
+                                </Draggable>
+                              ))}
+                              {itemDropProvided.placeholder}
+                            </div>
+                          )}
+                        </Droppable>
+                      </div>
+                    )}
+                  </Draggable>
+                ))}
+                {catDropProvided.placeholder}
               </div>
-            ))}
-          </div>
-        ))}
+            )}
+          </Droppable>
+        </DragDropContext>
 
         {/* Add Buttons */}
         <div className="flex gap-3 mt-6">
