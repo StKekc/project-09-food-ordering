@@ -28,8 +28,12 @@ import {
 } from '@/lib/admin-menu-dnd'
 import {
   apiCategoryToCategory,
+  createDish,
+  menuItemToCreatePayload,
+  menuItemToUpdatePayload,
   parseWeightGrams,
   persistMenuLayoutOrder,
+  updateDish,
 } from '@/lib/dishes-api'
 import { groupItemsByCategory } from '@/lib/menu-grouping'
 
@@ -68,9 +72,6 @@ function hasNonEmptySetting(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
 
-const DISH_IMAGE_PLACEHOLDER =
-  'https://habrastorage.org/r/w1560/getpro/habr/upload_files/cb0/f0b/c6f/cb0f0bc6f20ed4cb8b2d04e62efb4799.jpeg'
-
 export function AdminScreen() {
   const { setCurrentScreen, setIsAdmin, adminPhones, addAdminPhone, removeAdminPhone } = useApp()
   const { 
@@ -97,7 +98,16 @@ export function AdminScreen() {
     address: DEFAULT_RESTAURANT_ADDRESS,
   }))
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const [selectedImage, setSelectedImage] = useState<string | null>(null)
+  const [selectedImagePreview, setSelectedImagePreview] = useState<string | null>(null)
+  const [selectedImageFile, setSelectedImageFile] = useState<File | null>(null)
+  const clearImageSelection = useCallback(() => {
+    setSelectedImagePreview((prev) => {
+      if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev)
+      return null
+    })
+    setSelectedImageFile(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }, [])
   const [newAdminPhone, setNewAdminPhone] = useState('')
   const [saving, setSaving] = useState(false)
   const [reorderSaving, setReorderSaving] = useState(false)
@@ -322,9 +332,12 @@ export function AdminScreen() {
               category_id: item.category_id
                 ? Number(item.category_id)
                 : formCategories[0]?.id,
+              weightGrams: item.weightGrams ?? parseWeightGrams(item.weight) ?? undefined,
             },
           })
-          setSelectedImage(item.image_url)
+          setSelectedImagePreview(item.image_url || null)
+          setSelectedImageFile(null)
+          if (fileInputRef.current) fileInputRef.current.value = ''
           setEditMode('item')
         }
       }
@@ -334,16 +347,7 @@ export function AdminScreen() {
     if (action === 'stop' && type === 'item') {
       try {
         const isStopped = stoppedItems.has(id)
-        const resp = await fetch(`${API_URL}/dishes/${id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ is_active: isStopped }),
-        })
-        if (!resp.ok) {
-          const errData = await resp.json().catch(() => ({}))
-          setActionError(errData?.detail || 'Ошибка стоп-листа')
-          return
-        }
+        await updateDish(id, { is_active: isStopped })
         await refreshDishesFromApi()
       } catch (err) {
         setActionError('Не удалось изменить статус (stop)')
@@ -414,15 +418,14 @@ export function AdminScreen() {
         proteins: 0,
         fats: 0,
         carbs: 0,
-        dishNutrition: { calories: 0, proteins: 0, fats: 0, carbs: 0 },
-        image_url: '',
+        weightGrams: undefined,
         category_id:
           formCategories[0]?.id ??
           (localCategories[0] ? Number(localCategories[0].id) : undefined),
         weight: ''
       }
     })
-    setSelectedImage(null)
+    clearImageSelection()
     setEditMode('item')
   }
 
@@ -496,66 +499,41 @@ export function AdminScreen() {
       return
     }
 
-    const hasUploadedImage = Boolean(selectedImage || data.image_url)
-    const imageUrl = hasUploadedImage
-      ? (selectedImage || data.image_url)!
-      : DISH_IMAGE_PLACEHOLDER
-
     setSaving(true)
     setActionError(null)
     try {
+      const menuItemData: Partial<MenuItem> = {
+        name: data.name || '',
+        description: data.description || '',
+        price: Number(data.price) || 0,
+        category_id: String(data.category_id),
+        calories: Number(data.calories) || 0,
+        proteins: Number(data.proteins) || 0,
+        fats: Number(data.fats) || 0,
+        carbs: Number(data.carbs) || 0,
+        weightGrams: data.weightGrams,
+        weight: data.weight,
+      }
+
       if (editingItem.id) {
-        const payload = {
-          category_id: data.category_id,
-          name: data.name || '',
-          description: data.description || null,
-          price: Number(data.price) || 0,
-          nutrition_info: {
-            calories: data.calories ?? 0,
-            proteins: data.proteins ?? 0,
-            fats: data.fats ?? 0,
-            carbs: data.carbs ?? 0,
-          },
-          weight_grams: parseWeightGrams(data.weight),
-          image_url: imageUrl,
-          is_active: true,
-        }
-        const resp = await fetch(`${API_URL}/dishes/${editingItem.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        })
-        if (!resp.ok) {
-          const errData = await resp.json().catch(() => ({}))
-          setActionError(errData?.detail || 'Ошибка обновления блюда')
-          return
-        }
+        await updateDish(
+          editingItem.id,
+          { ...menuItemToUpdatePayload(menuItemData, localCategories), is_active: true },
+          selectedImageFile
+        )
         await refreshDishesFromApi()
       } else {
-        const payload = {
-          name: data.name || '',
-          description: data.description || '',
-          price: Number(data.price) || 0,
-          category_id: data.category_id,
-          image_url: imageUrl,
-        }
-        const resp = await fetch(`${API_URL}/dishes`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        })
-        if (!resp.ok) {
-          const errData = await resp.json().catch(() => ({}))
-          setActionError(errData?.detail || 'Ошибка добавления блюда')
-          return
-        }
+        await createDish(
+          menuItemToCreatePayload(menuItemData, localCategories),
+          selectedImageFile
+        )
         await refreshDishesFromApi()
       }
       setEditMode('none')
       setEditingItem(null)
-      setSelectedImage(null)
+      clearImageSelection()
     } catch (err) {
-      setActionError('Не удалось сохранить блюдо')
+      setActionError(err instanceof Error ? err.message : 'Не удалось сохранить блюдо')
       console.error(err)
     } finally {
       setSaving(false)
@@ -565,11 +543,11 @@ export function AdminScreen() {
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (file) {
-      const reader = new FileReader()
-      reader.onloadend = () => {
-        setSelectedImage(reader.result as string)
-      }
-      reader.readAsDataURL(file)
+      setSelectedImagePreview((prev) => {
+        if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev)
+        return URL.createObjectURL(file)
+      })
+      setSelectedImageFile(file)
     }
   }
 
@@ -921,7 +899,7 @@ export function AdminScreen() {
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center gap-3">
               <button
-                onClick={() => { setEditMode('none'); setEditingItem(null); setSelectedImage(null) }}
+                onClick={() => { setEditMode('none'); setEditingItem(null); clearImageSelection() }}
                 className="w-10 h-10 flex items-center justify-center bg-[#1a1a1a] rounded-lg border border-[#333]"
               >
                 <ArrowLeft className="w-5 h-5 text-white" />
@@ -1002,38 +980,87 @@ export function AdminScreen() {
               <h3 className="text-white font-semibold mb-4">Пищевая ценность на 100г</h3>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm text-[#a1a1aa] mb-2">Энергетическая ценность, кКал</label>
+                  <label className="block text-sm text-[#a1a1aa] mb-2">Вес блюда, грамм</label>
                   <input
                     type="number"
-                    value={data.calories || ''}
-                    onChange={(e) => setEditingItem({ ...editingItem, data: { ...data, calories: Number(e.target.value) } })}
+                    min={0}
+                    step={1}
+                    value={data.weightGrams ?? ''}
+                    onChange={(e) =>
+                      setEditingItem({
+                        ...editingItem,
+                        data: {
+                          ...data,
+                          weightGrams: e.target.value === '' ? undefined : Number(e.target.value),
+                        },
+                      })
+                    }
+                    placeholder="350"
+                    className="w-full bg-[#1a1a1a] border border-[#333] rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#D4AF37]"
+                  />
+                </div>
+                <div />
+                <div>
+                  <label className="block text-sm text-[#a1a1aa] mb-2">Калории, кКал</label>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={data.calories ?? ''}
+                    onChange={(e) =>
+                      setEditingItem({
+                        ...editingItem,
+                        data: { ...data, calories: e.target.value === '' ? 0 : Number(e.target.value) },
+                      })
+                    }
                     className="w-full bg-[#1a1a1a] border border-[#333] rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#D4AF37]"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm text-[#a1a1aa] mb-2">Белки, грамм</label>
+                  <label className="block text-sm text-[#a1a1aa] mb-2">Белки, г</label>
                   <input
                     type="number"
-                    value={data.proteins || ''}
-                    onChange={(e) => setEditingItem({ ...editingItem, data: { ...data, proteins: Number(e.target.value) } })}
+                    min={0}
+                    step={0.1}
+                    value={data.proteins ?? ''}
+                    onChange={(e) =>
+                      setEditingItem({
+                        ...editingItem,
+                        data: { ...data, proteins: e.target.value === '' ? 0 : Number(e.target.value) },
+                      })
+                    }
                     className="w-full bg-[#1a1a1a] border border-[#333] rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#D4AF37]"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm text-[#a1a1aa] mb-2">Жиры, грамм</label>
+                  <label className="block text-sm text-[#a1a1aa] mb-2">Жиры, г</label>
                   <input
                     type="number"
-                    value={data.fats || ''}
-                    onChange={(e) => setEditingItem({ ...editingItem, data: { ...data, fats: Number(e.target.value) } })}
+                    min={0}
+                    step={0.1}
+                    value={data.fats ?? ''}
+                    onChange={(e) =>
+                      setEditingItem({
+                        ...editingItem,
+                        data: { ...data, fats: e.target.value === '' ? 0 : Number(e.target.value) },
+                      })
+                    }
                     className="w-full bg-[#1a1a1a] border border-[#333] rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#D4AF37]"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm text-[#a1a1aa] mb-2">Углеводы, грамм</label>
+                  <label className="block text-sm text-[#a1a1aa] mb-2">Углеводы, г</label>
                   <input
                     type="number"
-                    value={data.carbs || ''}
-                    onChange={(e) => setEditingItem({ ...editingItem, data: { ...data, carbs: Number(e.target.value) } })}
+                    min={0}
+                    step={0.1}
+                    value={data.carbs ?? ''}
+                    onChange={(e) =>
+                      setEditingItem({
+                        ...editingItem,
+                        data: { ...data, carbs: e.target.value === '' ? 0 : Number(e.target.value) },
+                      })
+                    }
                     className="w-full bg-[#1a1a1a] border border-[#333] rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#D4AF37]"
                   />
                 </div>
@@ -1050,10 +1077,10 @@ export function AdminScreen() {
                 className="hidden"
               />
               
-              {selectedImage ? (
+              {selectedImagePreview ? (
                 <div className="relative">
                   <img
-                    src={selectedImage}
+                    src={selectedImagePreview}
                     alt="Preview"
                     className="w-full h-48 object-cover rounded-xl"
                   />
@@ -1066,7 +1093,7 @@ export function AdminScreen() {
                       Изменить фото
                     </button>
                     <button
-                      onClick={() => setSelectedImage(null)}
+                      onClick={clearImageSelection}
                       className="flex-1 bg-red-500/20 text-red-400 py-3 rounded-xl font-semibold flex items-center justify-center gap-2"
                     >
                       <Trash2 className="w-4 h-4" />

@@ -10,12 +10,13 @@ export interface MenuItem {
   name: string
   description: string
   price: number
-  // Nutrition per 100g
+  // Nutrition per 100g (from API *_100g fields)
   calories: number
   proteins: number
   fats: number
   carbs: number
-  // Nutrition for entire dish
+  weightGrams?: number
+  // Nutrition for entire dish (calculated from per 100g × weight)
   dishNutrition: NutritionInfo
   image_url: string
   category_id: string

@@ -2,14 +2,16 @@ import os
 import re
 import ssl
 import uuid
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse, urlunparse
+from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field
@@ -113,6 +115,69 @@ def get_engine() -> AsyncEngine:
     _engine = create_async_engine(database_url, pool_pre_ping=True, connect_args={"ssl": "require"})
     return _engine
 
+
+BACKEND_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BACKEND_DIR / "static"
+DISH_IMAGES_DIR = STATIC_DIR / "images" / "dishes"
+DISH_IMAGES_URL_PREFIX = "/static/images/dishes"
+
+_ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+_ALLOWED_IMAGE_CONTENT_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+}
+
+
+def _extension_for_upload(upload: UploadFile) -> str:
+    content_type = (upload.content_type or "").split(";", 1)[0].strip().lower()
+    by_type = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    if content_type in by_type:
+        return by_type[content_type]
+    ext = Path(upload.filename or "").suffix.lower()
+    if ext in _ALLOWED_IMAGE_EXTENSIONS:
+        return ext
+    return ".jpg"
+
+
+async def _save_dish_image(upload: UploadFile) -> str:
+    if not upload.filename:
+        raise HTTPException(status_code=422, detail="Empty image file")
+
+    content_type = (upload.content_type or "").split(";", 1)[0].strip().lower()
+    if content_type and content_type not in _ALLOWED_IMAGE_CONTENT_TYPES:
+        raise HTTPException(status_code=422, detail="Unsupported image type")
+
+    ext = _extension_for_upload(upload)
+    filename = f"{uuid.uuid4().hex}{ext}"
+    DISH_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    dest = DISH_IMAGES_DIR / filename
+
+    content = await upload.read()
+    if not content:
+        raise HTTPException(status_code=422, detail="Empty image file")
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="Image file is too large (max 10 MB)")
+
+    dest.write_bytes(content)
+    return f"{DISH_IMAGES_URL_PREFIX}/{filename}"
+
+
+def _delete_dish_image_file(image_url: str | None) -> None:
+    if not image_url or not image_url.startswith(DISH_IMAGES_URL_PREFIX + "/"):
+        return
+    filename = Path(image_url).name
+    path = DISH_IMAGES_DIR / filename
+    if path.is_file():
+        path.unlink(missing_ok=True)
+
+
 app = FastAPI(title="Food Ordering API")
 
 app.add_middleware(
@@ -202,6 +267,18 @@ async def _create_tables_on_startup() -> None:
                 """
             )
         )
+        for col in ("calories_100g", "proteins_100g", "fats_100g", "carbs_100g"):
+            await conn.execute(
+                text(
+                    f"""
+                    ALTER TABLE dishes
+                    ADD COLUMN IF NOT EXISTS {col} DOUBLE PRECISION NOT NULL DEFAULT 0
+                    """
+                )
+            )
+
+    DISH_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 
 async def get_conn() -> AsyncConnection:
@@ -337,6 +414,40 @@ async def upsert_user_profile(req: UserProfileUpsertRequest, conn: DbConn) -> Us
 
 
 DEFAULT_RESTAURANT_ID = int(os.getenv("DEFAULT_RESTAURANT_ID", "1"))
+ORDER_NUMBER_TZ = ZoneInfo(os.getenv("ORDER_NUMBER_TZ", "Europe/Moscow"))
+
+
+async def _generate_order_number(conn: AsyncConnection) -> str:
+    """Format: DDMMYYYY-NNN (daily sequence in restaurant timezone)."""
+    now = datetime.now(ORDER_NUMBER_TZ)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+    date_prefix = now.strftime("%d%m%Y")
+
+    res = await conn.execute(
+        text(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM orders
+            WHERE created_at >= :day_start AND created_at < :day_end
+            """
+        ),
+        {
+            "day_start": day_start,
+            "day_end": day_end,
+        },
+    )
+    today_count = int(res.mappings().one()["cnt"])
+    return f"{date_prefix}-{today_count + 1:03d}"
+
+
+def _is_unique_violation(exc: BaseException) -> bool:
+    if isinstance(exc, IntegrityError):
+        orig = getattr(exc, "orig", None)
+        if orig is not None:
+            code = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+            return code == "23505"
+    return False
 
 
 def _slugify_category_name(name: str) -> str:
@@ -610,7 +721,11 @@ class DishResponse(BaseModel):
     old_price: Decimal | None
     ingredients: str | None
     nutrition_info: Any | None
-    weight_grams: int | None
+    weight_grams: int | None = None
+    calories_100g: float = 0.0
+    proteins_100g: float = 0.0
+    fats_100g: float = 0.0
+    carbs_100g: float = 0.0
     is_available: bool
     is_active: bool
     is_recommended: bool
@@ -631,6 +746,10 @@ class DishCreate(BaseModel):
     ingredients: str | None = None
     nutrition_info: Any | None = None
     weight_grams: int | None = None
+    calories_100g: float = 0.0
+    proteins_100g: float = 0.0
+    fats_100g: float = 0.0
+    carbs_100g: float = 0.0
     is_available: bool = True
     is_recommended: bool = False
     is_spicy: bool = False
@@ -649,6 +768,10 @@ class DishUpdate(BaseModel):
     ingredients: str | None = None
     nutrition_info: Any | None = None
     weight_grams: int | None = None
+    calories_100g: float | None = None
+    proteins_100g: float | None = None
+    fats_100g: float | None = None
+    carbs_100g: float | None = None
     is_available: bool | None = None
     is_recommended: bool | None = None
     is_spicy: bool | None = None
@@ -658,37 +781,82 @@ class DishUpdate(BaseModel):
     is_active: bool | None = None
 
 
+_DISH_RETURNING_COLUMNS = """
+  id, category_id, position, name, description, price, old_price,
+  ingredients, nutrition_info, weight_grams,
+  calories_100g, proteins_100g, fats_100g, carbs_100g,
+  is_available, is_active, is_recommended, is_spicy, popularity_score,
+  image_url, preparation_time_min, created_at, updated_at
+"""
+
+
 @app.post("/dishes", response_model=DishResponse, status_code=status.HTTP_201_CREATED)
-async def create_dish(req: DishCreate, conn: DbConn) -> DishResponse:
+async def create_dish(
+    conn: DbConn,
+    category_id: int = Form(...),
+    name: str = Form(...),
+    price: Decimal = Form(...),
+    description: str | None = Form(None),
+    weight_grams: int | None = Form(None),
+    calories_100g: float = Form(0),
+    proteins_100g: float = Form(0),
+    fats_100g: float = Form(0),
+    carbs_100g: float = Form(0),
+    is_available: bool = Form(True),
+    is_recommended: bool = Form(False),
+    is_spicy: bool = Form(False),
+    is_active: bool = Form(True),
+    image: UploadFile | None = File(None),
+) -> DishResponse:
+    image_url: str | None = None
+    if image is not None and image.filename:
+        image_url = await _save_dish_image(image)
+
     try:
         res = await conn.execute(
             text(
-                """
+                f"""
                 INSERT INTO dishes (
                   category_id, name, description, price, old_price, ingredients,
-                  nutrition_info, weight_grams, is_available, is_recommended, is_spicy,
+                  nutrition_info, weight_grams, calories_100g, proteins_100g, fats_100g, carbs_100g,
+                  is_available, is_recommended, is_spicy,
                   popularity_score, image_url, preparation_time_min, is_active, position
                 )
                 VALUES (
-                  :category_id, :name, :description, :price, :old_price, :ingredients,
-                  :nutrition_info, :weight_grams, :is_available, :is_recommended, :is_spicy,
-                  :popularity_score, :image_url, :preparation_time_min, :is_active,
+                  :category_id, :name, :description, :price, NULL, NULL,
+                  NULL, :weight_grams, :calories_100g, :proteins_100g, :fats_100g, :carbs_100g,
+                  :is_available, :is_recommended, :is_spicy,
+                  0, :image_url, NULL, :is_active,
                   (SELECT COALESCE(MAX(d.position), -1) + 1 FROM dishes d)
                 )
                 RETURNING
-                  id, category_id, position, name, description, price, old_price,
-                  ingredients, nutrition_info, weight_grams,
-                  is_available, is_active, is_recommended, is_spicy, popularity_score,
-                  image_url, preparation_time_min, created_at, updated_at
+                  {_DISH_RETURNING_COLUMNS}
                 """
             ),
-            req.model_dump(),
+            {
+                "category_id": category_id,
+                "name": name.strip(),
+                "description": description,
+                "price": price,
+                "weight_grams": weight_grams,
+                "calories_100g": calories_100g,
+                "proteins_100g": proteins_100g,
+                "fats_100g": fats_100g,
+                "carbs_100g": carbs_100g,
+                "is_available": is_available,
+                "is_recommended": is_recommended,
+                "is_spicy": is_spicy,
+                "is_active": is_active,
+                "image_url": image_url,
+            },
         )
         await conn.commit()
         row = res.mappings().one()
         return DishResponse(**row)
     except Exception:
         await conn.rollback()
+        if image_url:
+            _delete_dish_image_file(image_url)
         raise
 
 
@@ -707,53 +875,123 @@ async def reorder_dishes(req: ReorderIdsRequest, conn: DbConn) -> ReorderRespons
 
 
 @app.put("/dishes/{dish_id}", response_model=DishResponse)
-async def update_dish(dish_id: int, req: DishUpdate, conn: DbConn) -> DishResponse:
-    data = req.model_dump(exclude_unset=True)
-    if not data:
+async def update_dish(
+    dish_id: int,
+    conn: DbConn,
+    category_id: int | None = Form(None),
+    name: str | None = Form(None),
+    description: str | None = Form(None),
+    price: Decimal | None = Form(None),
+    weight_grams: int | None = Form(None),
+    calories_100g: float | None = Form(None),
+    proteins_100g: float | None = Form(None),
+    fats_100g: float | None = Form(None),
+    carbs_100g: float | None = Form(None),
+    is_available: bool | None = Form(None),
+    is_recommended: bool | None = Form(None),
+    is_spicy: bool | None = Form(None),
+    is_active: bool | None = Form(None),
+    image: UploadFile | None = File(None),
+) -> DishResponse:
+    dish_id = _require_int_id(dish_id, name="dish_id")
+    has_image = image is not None and bool(image.filename)
+    has_fields = any(
+        v is not None
+        for v in (
+            category_id,
+            name,
+            description,
+            price,
+            weight_grams,
+            calories_100g,
+            proteins_100g,
+            fats_100g,
+            carbs_100g,
+            is_available,
+            is_recommended,
+            is_spicy,
+            is_active,
+        )
+    )
+    if not has_fields and not has_image:
         raise HTTPException(status_code=422, detail="No fields to update")
+
+    new_image_url: str | None = None
+    old_image_url: str | None = None
+    if has_image:
+        existing = await conn.execute(
+            text("SELECT image_url FROM dishes WHERE id = :dish_id"),
+            {"dish_id": dish_id},
+        )
+        row = existing.mappings().first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Dish not found")
+        old_image_url = row["image_url"]
+        new_image_url = await _save_dish_image(image)
 
     try:
         res = await conn.execute(
             text(
-                """
+                f"""
                 UPDATE dishes
                 SET
                   category_id = COALESCE(:category_id, category_id),
                   name = COALESCE(:name, name),
                   description = COALESCE(:description, description),
                   price = COALESCE(:price, price),
-                  old_price = COALESCE(:old_price, old_price),
-                  ingredients = COALESCE(:ingredients, ingredients),
-                  nutrition_info = COALESCE(:nutrition_info, nutrition_info),
                   weight_grams = COALESCE(:weight_grams, weight_grams),
+                  calories_100g = COALESCE(:calories_100g, calories_100g),
+                  proteins_100g = COALESCE(:proteins_100g, proteins_100g),
+                  fats_100g = COALESCE(:fats_100g, fats_100g),
+                  carbs_100g = COALESCE(:carbs_100g, carbs_100g),
                   is_available = COALESCE(:is_available, is_available),
                   is_recommended = COALESCE(:is_recommended, is_recommended),
                   is_spicy = COALESCE(:is_spicy, is_spicy),
-                  popularity_score = COALESCE(:popularity_score, popularity_score),
-                  image_url = COALESCE(:image_url, image_url),
-                  preparation_time_min = COALESCE(:preparation_time_min, preparation_time_min),
                   is_active = COALESCE(:is_active, is_active),
+                  image_url = COALESCE(:image_url, image_url),
                   updated_at = NOW()
                 WHERE id = :dish_id
                 RETURNING
-                  id, category_id, position, name, description, price, old_price,
-                  ingredients, nutrition_info, weight_grams,
-                  is_available, is_active, is_recommended, is_spicy, popularity_score,
-                  image_url, preparation_time_min, created_at, updated_at
+                  {_DISH_RETURNING_COLUMNS}
                 """
             ),
-            {"dish_id": dish_id, **{k: data.get(k) for k in DishUpdate.model_fields.keys()}},
+            {
+                "dish_id": dish_id,
+                "category_id": category_id,
+                "name": name.strip() if name is not None else None,
+                "description": description,
+                "price": price,
+                "weight_grams": weight_grams,
+                "calories_100g": calories_100g,
+                "proteins_100g": proteins_100g,
+                "fats_100g": fats_100g,
+                "carbs_100g": carbs_100g,
+                "is_available": is_available,
+                "is_recommended": is_recommended,
+                "is_spicy": is_spicy,
+                "is_active": is_active,
+                "image_url": new_image_url,
+            },
         )
         row = res.mappings().first()
         if row is None:
             await conn.rollback()
+            if new_image_url:
+                _delete_dish_image_file(new_image_url)
             raise HTTPException(status_code=404, detail="Dish not found")
         await conn.commit()
+        if new_image_url and old_image_url and old_image_url != new_image_url:
+            _delete_dish_image_file(old_image_url)
         return DishResponse(**row)
     except HTTPException:
+        await conn.rollback()
+        if new_image_url:
+            _delete_dish_image_file(new_image_url)
         raise
     except Exception:
         await conn.rollback()
+        if new_image_url:
+            _delete_dish_image_file(new_image_url)
         raise
 
 
@@ -824,6 +1062,7 @@ async def list_dishes(
             SELECT
               d.id, d.category_id, d.position, d.name, d.description, d.price, d.old_price,
               d.ingredients, d.nutrition_info, d.weight_grams,
+              d.calories_100g, d.proteins_100g, d.fats_100g, d.carbs_100g,
               d.is_available, d.is_active, d.is_recommended, d.is_spicy, d.popularity_score,
               d.image_url, d.preparation_time_min, d.created_at, d.updated_at
             FROM dishes d
@@ -973,64 +1212,75 @@ async def create_order(req: OrderCreateRequest, conn: DbConn) -> OrderCreateResp
         unit_price = Decimal(str(dish_map[it.dish_id]["price"]))
         total += unit_price * it.quantity
 
-    order_number = uuid.uuid4().hex[:12].upper()
-
-    try:
-        order_res = await conn.execute(
-            text(
-                """
-                INSERT INTO orders (
-                  user_id, order_number, restaurant_id, status, delivery_type,
-                  table_number, total_amount, customer_phone, customer_name, special_instructions
-                )
-                VALUES (
-                  :user_id, :order_number, :restaurant_id, 'pending', :delivery_type,
-                  :table_number, :total_amount, :customer_phone, :customer_name, :special_instructions
-                )
-                RETURNING id, order_number, status, total_amount, created_at
-                """
-            ),
-            {
-                "user_id": req.user_id,
-                "order_number": order_number,
-                "restaurant_id": req.restaurant_id,
-                "delivery_type": req.delivery_type,
-                "table_number": req.table_number,
-                "total_amount": total,
-                "customer_phone": req.customer_phone,
-                "customer_name": req.customer_name,
-                "special_instructions": req.special_instructions,
-            },
-        )
-        order_row = order_res.mappings().one()
-        order_id = int(order_row["id"])
-
-        for it in req.items:
-            unit_price = Decimal(str(dish_map[it.dish_id]["price"]))
-            await conn.execute(
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        try:
+            order_number = await _generate_order_number(conn)
+            order_res = await conn.execute(
                 text(
                     """
-                    INSERT INTO order_items (order_id, dish_id, quantity, unit_price, special_instructions)
-                    VALUES (:order_id, :dish_id, :quantity, :unit_price, :special_instructions)
+                    INSERT INTO orders (
+                      user_id, order_number, restaurant_id, status, delivery_type,
+                      table_number, total_amount, customer_phone, customer_name, special_instructions
+                    )
+                    VALUES (
+                      :user_id, :order_number, :restaurant_id, 'pending', :delivery_type,
+                      :table_number, :total_amount, :customer_phone, :customer_name, :special_instructions
+                    )
+                    RETURNING id, order_number, status, total_amount, created_at
                     """
                 ),
                 {
-                    "order_id": order_id,
-                    "dish_id": it.dish_id,
-                    "quantity": it.quantity,
-                    "unit_price": unit_price,
-                    "special_instructions": it.special_instructions,
+                    "user_id": req.user_id,
+                    "order_number": order_number,
+                    "restaurant_id": req.restaurant_id,
+                    "delivery_type": req.delivery_type,
+                    "table_number": req.table_number,
+                    "total_amount": total,
+                    "customer_phone": req.customer_phone,
+                    "customer_name": req.customer_name,
+                    "special_instructions": req.special_instructions,
                 },
             )
+            order_row = order_res.mappings().one()
+            order_id = int(order_row["id"])
 
-        await conn.commit()
-        return OrderCreateResponse(**order_row)
-    except HTTPException:
-        await conn.rollback()
-        raise
-    except Exception:
-        await conn.rollback()
-        raise
+            for it in req.items:
+                unit_price = Decimal(str(dish_map[it.dish_id]["price"]))
+                await conn.execute(
+                    text(
+                        """
+                        INSERT INTO order_items (order_id, dish_id, quantity, unit_price, special_instructions)
+                        VALUES (:order_id, :dish_id, :quantity, :unit_price, :special_instructions)
+                        """
+                    ),
+                    {
+                        "order_id": order_id,
+                        "dish_id": it.dish_id,
+                        "quantity": it.quantity,
+                        "unit_price": unit_price,
+                        "special_instructions": it.special_instructions,
+                    },
+                )
+
+            await conn.commit()
+            return OrderCreateResponse(**order_row)
+        except HTTPException:
+            await conn.rollback()
+            raise
+        except IntegrityError as exc:
+            await conn.rollback()
+            if _is_unique_violation(exc) and attempt < max_attempts - 1:
+                continue
+            raise
+        except Exception:
+            await conn.rollback()
+            raise
+
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Could not generate a unique order number",
+    )
 
 
 async def _require_admin(conn: DbConn, phone: str) -> None:
@@ -1288,6 +1538,9 @@ async def make_admin(req: MakeAdminRequest, conn: DbConn) -> dict[str, Any]:
     except Exception:
         await conn.rollback()
         raise
+
+
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 if __name__ == "__main__":

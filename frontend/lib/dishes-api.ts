@@ -1,4 +1,5 @@
 import type { Category, MenuItem, NutritionInfo } from './data'
+import { calculateDishNutrition, per100gFromDishApi } from './nutrition'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? ''
 
@@ -17,6 +18,10 @@ export interface DishResponse {
   ingredients: string | null
   nutrition_info: NutritionInfo | null
   weight_grams: number | null
+  calories_100g?: number
+  proteins_100g?: number
+  fats_100g?: number
+  carbs_100g?: number
   is_available: boolean
   is_active: boolean
   is_recommended: boolean
@@ -31,9 +36,11 @@ export interface DishCreatePayload {
   name: string
   description?: string | null
   price: number
-  nutrition_info?: NutritionInfo | null
   weight_grams?: number | null
-  image_url?: string | null
+  calories_100g?: number
+  proteins_100g?: number
+  fats_100g?: number
+  carbs_100g?: number
   is_active?: boolean
 }
 
@@ -42,9 +49,11 @@ export interface DishUpdatePayload {
   name?: string
   description?: string | null
   price?: number
-  nutrition_info?: NutritionInfo | null
   weight_grams?: number | null
-  image_url?: string | null
+  calories_100g?: number
+  proteins_100g?: number
+  fats_100g?: number
+  carbs_100g?: number
   is_active?: boolean
 }
 
@@ -66,6 +75,41 @@ async function parseError(res: Response): Promise<string> {
     /* ignore */
   }
   return res.statusText || 'Request failed'
+}
+
+export function resolveDishImageUrl(imageUrl: string | null | undefined): string {
+  if (!imageUrl?.trim()) return ''
+  const normalized = imageUrl.trim()
+  if (
+    normalized.startsWith('http://') ||
+    normalized.startsWith('https://') ||
+    normalized.startsWith('data:')
+  ) {
+    return normalized
+  }
+  if (normalized.startsWith('/')) {
+    try {
+      return `${apiBase()}${normalized}`
+    } catch {
+      return normalized
+    }
+  }
+  return normalized
+}
+
+export function buildDishFormData(
+  payload: DishCreatePayload | DishUpdatePayload,
+  imageFile?: File | null
+): FormData {
+  const fd = new FormData()
+  for (const [key, value] of Object.entries(payload)) {
+    if (value === undefined || value === null) continue
+    fd.append(key, String(value))
+  }
+  if (imageFile) {
+    fd.append('image', imageFile)
+  }
+  return fd
 }
 
 export function apiCategoryToCategory(api: ApiCategoryResponse): Category {
@@ -120,11 +164,13 @@ export async function fetchDishes(options?: {
   return res.json()
 }
 
-export async function createDish(payload: DishCreatePayload): Promise<DishResponse> {
+export async function createDish(
+  payload: DishCreatePayload,
+  imageFile?: File | null
+): Promise<DishResponse> {
   const res = await fetch(`${apiBase()}/dishes`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: buildDishFormData(payload, imageFile),
   })
   if (!res.ok) throw new Error(await parseError(res))
   return res.json()
@@ -132,12 +178,12 @@ export async function createDish(payload: DishCreatePayload): Promise<DishRespon
 
 export async function updateDish(
   dishId: string,
-  payload: DishUpdatePayload
+  payload: DishUpdatePayload,
+  imageFile?: File | null
 ): Promise<DishResponse> {
   const res = await fetch(`${apiBase()}/dishes/${dishId}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: buildDishFormData(payload, imageFile),
   })
   if (!res.ok) throw new Error(await parseError(res))
   return res.json()
@@ -177,12 +223,28 @@ export async function deleteDishApi(dishId: string): Promise<void> {
   if (!res.ok) throw new Error(await parseError(res))
 }
 
-export function parseWeightGrams(weight?: string): number | null {
-  if (!weight) return null
+export function parseWeightGrams(weight?: string | number): number | null {
+  if (weight == null || weight === '') return null
+  if (typeof weight === 'number') {
+    return Number.isFinite(weight) && weight > 0 ? Math.round(weight) : null
+  }
   const digits = weight.replace(/\D/g, '')
   if (!digits) return null
   const grams = parseInt(digits, 10)
   return Number.isFinite(grams) ? grams : null
+}
+
+function nutritionPayloadFromMenuItem(data: Partial<MenuItem>) {
+  return {
+    calories_100g: Number(data.calories ?? 0),
+    proteins_100g: Number(data.proteins ?? 0),
+    fats_100g: Number(data.fats ?? 0),
+    carbs_100g: Number(data.carbs ?? 0),
+    weight_grams:
+      data.weightGrams != null && data.weightGrams > 0
+        ? Math.round(data.weightGrams)
+        : parseWeightGrams(data.weight),
+  }
 }
 
 export function menuItemToCreatePayload(
@@ -200,14 +262,7 @@ export function menuItemToCreatePayload(
     name: data.name || '',
     description: data.description || null,
     price: data.price || 0,
-    nutrition_info: {
-      calories: data.calories ?? 0,
-      proteins: data.proteins ?? 0,
-      fats: data.fats ?? 0,
-      carbs: data.carbs ?? 0,
-    },
-    weight_grams: parseWeightGrams(data.weight),
-    image_url: data.image_url || null,
+    ...nutritionPayloadFromMenuItem(data),
     is_active: true,
   }
 }
@@ -220,14 +275,7 @@ export function menuItemToUpdatePayload(
     name: data.name,
     description: data.description ?? null,
     price: data.price,
-    nutrition_info: {
-      calories: data.calories ?? 0,
-      proteins: data.proteins ?? 0,
-      fats: data.fats ?? 0,
-      carbs: data.carbs ?? 0,
-    },
-    weight_grams: parseWeightGrams(data.weight),
-    image_url: data.image_url || null,
+    ...nutritionPayloadFromMenuItem(data),
   }
   if (data.category_id) {
     payload.category_id = parseInt(data.category_id, 10)
@@ -240,25 +288,22 @@ export function activeDishesToMenuItems(dishes: DishResponse[]): MenuItem[] {
 }
 
 export function dishResponseToMenuItem(dish: DishResponse): MenuItem {
-  const nutrition = dish.nutrition_info ?? {
-    calories: 0,
-    proteins: 0,
-    fats: 0,
-    carbs: 0,
-  }
+  const per100g = per100gFromDishApi(dish)
+  const weightGrams = dish.weight_grams ?? null
 
   return {
     id: String(dish.id),
     name: dish.name,
     description: dish.description ?? '',
     price: Number(dish.price),
-    calories: nutrition.calories ?? 0,
-    proteins: nutrition.proteins ?? 0,
-    fats: nutrition.fats ?? 0,
-    carbs: nutrition.carbs ?? 0,
-    dishNutrition: { ...nutrition },
-    image_url: dish.image_url ?? '',
+    calories: per100g.calories,
+    proteins: per100g.proteins,
+    fats: per100g.fats,
+    carbs: per100g.carbs,
+    weightGrams: weightGrams ?? undefined,
+    dishNutrition: calculateDishNutrition(per100g, weightGrams),
+    image_url: resolveDishImageUrl(dish.image_url),
     category_id: String(dish.category_id),
-    weight: dish.weight_grams ? `${dish.weight_grams}г` : undefined,
+    weight: weightGrams ? `${weightGrams}г` : undefined,
   }
 }

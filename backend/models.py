@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     Numeric,
@@ -63,6 +64,10 @@ class Dish(Base):
     ingredients: Mapped[str | None] = mapped_column(Text, nullable=True)
     nutrition_info: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     weight_grams: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    calories_100g: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    proteins_100g: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    fats_100g: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    carbs_100g: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
 
     is_available: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true", index=True)
     is_recommended: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")

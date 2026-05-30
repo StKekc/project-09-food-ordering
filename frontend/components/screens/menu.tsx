@@ -8,6 +8,7 @@ import { useCart } from '@/lib/cart-context'
 import { useMenu } from '@/lib/menu-context'
 import type { MenuItem } from '@/lib/data'
 import { groupItemsByCategory } from '@/lib/menu-grouping'
+import { formatNutritionValue } from '@/lib/nutrition'
 import Image from 'next/image'
 
 const LOGO_URL = 'https://hebbkx1anhila5yf.public.blob.vercel-storage.com/Frame%202-ka88YF1wTzYyPws7x9erhGnno6h2HV.png'
@@ -395,19 +396,19 @@ export function MenuScreen() {
                   <p className="text-xs sm:text-sm text-[#666] mb-2">Пищевая ценность на 100г</p>
                   <div className="grid grid-cols-4 gap-1.5 sm:gap-2">
                     <div className="bg-[#252525] rounded-lg p-1.5 sm:p-2 text-center">
-                      <p className="text-sm sm:text-base font-bold text-white">{selectedItem.calories}</p>
+                      <p className="text-sm sm:text-base font-bold text-white">{formatNutritionValue(selectedItem.calories)}</p>
                       <p className="text-[10px] sm:text-xs text-[#666]">ккал</p>
                     </div>
                     <div className="bg-[#252525] rounded-lg p-1.5 sm:p-2 text-center">
-                      <p className="text-sm sm:text-base font-bold text-white">{selectedItem.proteins}</p>
+                      <p className="text-sm sm:text-base font-bold text-white">{formatNutritionValue(selectedItem.proteins)}</p>
                       <p className="text-[10px] sm:text-xs text-[#666]">белки</p>
                     </div>
                     <div className="bg-[#252525] rounded-lg p-1.5 sm:p-2 text-center">
-                      <p className="text-sm sm:text-base font-bold text-white">{selectedItem.fats}</p>
+                      <p className="text-sm sm:text-base font-bold text-white">{formatNutritionValue(selectedItem.fats)}</p>
                       <p className="text-[10px] sm:text-xs text-[#666]">жиры</p>
                     </div>
                     <div className="bg-[#252525] rounded-lg p-1.5 sm:p-2 text-center">
-                      <p className="text-sm sm:text-base font-bold text-white">{selectedItem.carbs}</p>
+                      <p className="text-sm sm:text-base font-bold text-white">{formatNutritionValue(selectedItem.carbs)}</p>
                       <p className="text-[10px] sm:text-xs text-[#666]">углеводы</p>
                     </div>
                   </div>
