@@ -77,23 +77,40 @@ async function parseError(res: Response): Promise<string> {
   return res.statusText || 'Request failed'
 }
 
+const LEGACY_BASE64_MIN_LENGTH = 500
+
+/** Resolves dish image for <img src>: legacy Base64, static paths, or absolute URLs. */
 export function resolveDishImageUrl(imageUrl: string | null | undefined): string {
   if (!imageUrl?.trim()) return ''
   const normalized = imageUrl.trim()
-  if (
-    normalized.startsWith('http://') ||
-    normalized.startsWith('https://') ||
-    normalized.startsWith('data:')
-  ) {
+
+  if (normalized.startsWith('data:image')) {
     return normalized
   }
-  if (normalized.startsWith('/')) {
+
+  if (
+    normalized.length >= LEGACY_BASE64_MIN_LENGTH &&
+    !normalized.startsWith('http://') &&
+    !normalized.startsWith('https://') &&
+    !normalized.startsWith('/')
+  ) {
+    return normalized.startsWith('data:')
+      ? normalized
+      : `data:image/jpeg;base64,${normalized}`
+  }
+
+  if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+    return normalized
+  }
+
+  if (normalized.startsWith('/static') || normalized.startsWith('/')) {
     try {
       return `${apiBase()}${normalized}`
     } catch {
       return normalized
     }
   }
+
   return normalized
 }
 
